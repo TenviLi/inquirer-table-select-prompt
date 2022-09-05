@@ -1,324 +1,385 @@
-import ansiEscapes from 'ansi-escapes'
-import figures from 'figures'
+// import ansiEscapes from 'ansi-escapes'
+// const runAsync = require('run-async')
+// import _debounce = require('lodash.debounce')
+import type { Ora } from 'ora'
+import ora = require('ora')
+import pc = require('picocolors')
+import figures = require('figures')
 import Base = require('inquirer/lib/prompts/base')
-import Choices = require('inquirer/lib/objects/choices')
 import observe = require('inquirer/lib/utils/events')
 import utils = require('inquirer/lib/utils/readline')
-import Paginator = require('inquirer/lib/utils/paginator')
-import ScreenManager = require('inquirer/lib/utils/screen-manager')
-import pc = require('picocolors')
-const runAsync = require('run-async')
+import Paginator from './utils/paginator'
 import { takeWhile } from 'rxjs/operators'
 import Table = require('easy-table')
-import type inquirer = require('inquirer')
+import inquirer = require('inquirer')
+import assert = require('assert')
+import cliCursor = require('cli-cursor')
 import type { Interface as ReadLineInterface } from 'readline'
-import type { TableSelectConfig } from './interfaces/ITableSelect'
+import type { KeypressEvent, Row, SourceType, PropsState, TabChoiceList, TableSelectConfig } from './types'
+import { Status } from './types'
+import { chunk } from './utils/common'
 
-const isSelectable = (choice: { type: string; disabled: any }) => choice.type !== 'separator' && !choice.disabled
-
-class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Question> {
-  protected currentChoices
-  protected firstRender
-  protected selected
-  protected initialValue
-  protected paginator = new Paginator(this.screen, {
+export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Question> {
+  protected pageSize: number = this.opt.pageSize || 10
+  protected spinner: Ora = ora({ text: this.opt.loadingText || 'Loading...', discardStdin: false })
+  protected readonly paginator = new Paginator(this.screen, {
     isInfinite: this.opt.loop === undefined ? true : this.opt.loop,
+    isShowHelp: false,
   })
-  protected done!: Function
-  protected answer: undefined
-  protected shortAnswer: any
-  protected answerName: any
-  protected searching: any
-  protected nbChoices: any
-  protected searchedOnce: any
-  protected lastSearchTerm: any
+  protected tabChoiceKey?: string
+  protected tabChoiceList?: TabChoiceList
+
+  protected ui: PropsState = {
+    isLoadingOnce: false,
+    isLoading: true,
+    isFirstRender: true,
+    isToggledHelp: false,
+    selectedIndex: 0,
+    currentTabIndex: 0,
+    pagination: null,
+  }
+  public status = Status.Pending
+  protected answer: any
+  protected done!: (value: any) => void
+
+  protected data: Row[] = []
+  protected requestOpts: Record<string, unknown> = {}
+
+  get currentTabValue() {
+    //@ts-ignore
+    return this.tabChoiceList![this.ui.currentTabIndex].value
+  }
+
+  get currentRow() {
+    return this.data[this.ui.selectedIndex]
+  }
 
   constructor(question: inquirer.Question<inquirer.Answers>, rl: ReadLineInterface, answers: inquirer.Answers) {
     super(question, rl, answers)
 
-    if (!this.opt.source) {
-      this.throwParamError('source')
-    }
+    assert.ok(this.opt.data || this.opt.source, 'Your muse provide `data` or `source` parameter')
+    if (!this.opt.source && ['sourcePrompts', 'loadingText'].some((v) => v in this.opt)) this.throwParamError('source')
 
-    // @ts-ignore
-    this.currentChoices = new Choices([])
+    if (this.opt.tab) {
+      if (!this.opt.sourcePrompts) this.throwParamError('sourcePrompts')
 
-    this.firstRender = true
-    this.selected = 0
-
-    // Make sure no default is set (so it won't be printed)
-    this.initialValue = this.opt.default
-    if (!this.opt.suggestOnly) {
-      this.opt.default = null
-    }
-  }
-
-  _run(callback: Function) {
-    this.done = callback
-
-    // @ts-ignore
-    if (Array.isArray(this.rl.history)) {
-      // @ts-ignore
-      this.rl.history = []
-    }
-
-    const events = observe(this.rl)
-
-    const dontHaveAnswer = () => this.answer === undefined
-
-    events.line.pipe(takeWhile(dontHaveAnswer)).forEach(this.onSubmit.bind(this))
-    events.keypress.pipe(takeWhile(dontHaveAnswer)).forEach(this.onKeypress.bind(this))
-
-    // Call once at init
-    this.search(undefined)
-
-    return this
-  }
-
-  render(error?: string): void {
-    // Render question
-    let content = this.getQuestion()
-    let bottomContent = ''
-
-    if (this.firstRender) {
-      const suggestText = this.opt.suggestOnly ? ', tab to autocomplete' : ''
-      content += pc.dim('(Use arrow keys or type to search' + suggestText + ')')
-    }
-
-    // Render choices or answer depending on the state
-    if (this.status === 'answered') {
-      content += pc.cyan(this.shortAnswer || this.answerName || this.answer)
-    } else if (this.searching) {
-      content += this.rl.line
-      bottomContent += '  ' + pc.dim(this.opt.loadingText || 'Searching...')
-    } else if (this.nbChoices) {
-      const choicesStr = listRender(this.currentChoices, this.selected)
-      content += this.rl.line
-      const indexPosition = this.selected
-      let realIndexPosition = 0
-      this.currentChoices.choices.every((choice, index) => {
-        if (index > indexPosition) {
-          return false
-        }
-        const name = choice.name
-        realIndexPosition += name ? name.split('\n').length : 0
-        return true
-      })
-      bottomContent += this.paginator.paginate(choicesStr, realIndexPosition, this.opt.pageSize)
-    } else {
-      content += this.rl.line
-      bottomContent += '  ' + pc.yellow(this.opt.emptyText || 'No results...')
-    }
-
-    if (error) {
-      bottomContent += '\n' + pc.red('>> ') + error
-    }
-
-    this.firstRender = false
-
-    this.screen.render(content, bottomContent)
-  }
-
-  onSubmit(line?: string) {
-    let lineOrRl = line || this.rl.line
-
-    // only set default when suggestOnly (behaving as input prompt)
-    // list prompt does only set default if matching actual item in list
-    if (this.opt.suggestOnly && !lineOrRl) {
-      lineOrRl = this.opt.default === null ? '' : this.opt.default
-    }
-
-    if (typeof this.opt.validate === 'function') {
-      const checkValidationResult = (validationResult) => {
-        if (validationResult !== true) {
-          this.render(validationResult || 'Enter something, tab to autocomplete!')
-        } else {
-          this.onSubmitAfterValidation(lineOrRl)
-        }
+      const index = this.opt.sourcePrompts!.findIndex((v) => v.name === this.opt.tab)
+      if (!index) this.throwParamError('tab')
+      else {
+        const { name, choices } = this.opt.sourcePrompts!.splice(index, 1)[0]
+        this.tabChoiceKey = name
+        this.tabChoiceList = choices.filter((choice) => choice.type !== 'separator')
       }
-
-      let validationResult
-      if (this.opt.suggestOnly) {
-        validationResult = this.opt.validate(lineOrRl, this.answers)
-      } else {
-        const choice = this.currentChoices.getChoice(this.selected)
-        validationResult = this.opt.validate(choice, this.answers)
-      }
-
-      if (isPromise(validationResult)) {
-        validationResult.then(checkValidationResult)
-      } else {
-        checkValidationResult(validationResult)
-      }
-    } else {
-      this.onSubmitAfterValidation(lineOrRl)
     }
   }
 
-  onSubmitAfterValidation(line /* : string */) {
-    let choice = {}
-    if (this.nbChoices <= this.selected && !this.opt.suggestOnly) {
-      this.rl.write(line)
-      this.search(line)
-      return
-    }
+  async request(requestOpts = this.requestOpts || {}, pagination = this.ui.pagination) {
+    this.ui.isLoading = true
+    this.render()
 
-    if (this.opt.suggestOnly) {
-      choice.value = line || this.rl.line
-      this.answer = line || this.rl.line
-      this.answerName = line || this.rl.line
-      this.shortAnswer = line || this.rl.line
-      this.rl.line = ''
-    } else if (this.nbChoices) {
-      choice = this.currentChoices.getChoice(this.selected)
-      this.answer = choice.value
-      this.answerName = choice.name
-      this.shortAnswer = choice.short
-    } else {
-      this.rl.write(line)
-      this.search(line)
-      return
-    }
-
-    runAsync(this.opt.filter, (err, value) => {
-      choice.value = value
-      this.answer = value
-
-      if (this.opt.suggestOnly) {
-        this.shortAnswer = value
-      }
-
-      this.status = 'answered'
-      // Rerender prompt
-      this.render()
-      this.screen.done()
-      this.done(choice.value)
-    })(choice.value)
-  }
-
-  search(searchTerm?: string): Promise<any> {
-    this.selected = 0
-
-    // Only render searching state after first time
-    if (this.searchedOnce) {
-      this.searching = true
-      this.currentChoices = new Choices([])
-      this.render() // Now render current searching state
-    } else {
-      this.searchedOnce = true
-    }
-
-    this.lastSearchTerm = searchTerm
-
-    let thisPromise: Promise<any>
+    let thisPromise: Promise<SourceType>
     try {
-      const result = this.opt.source(this.answers, searchTerm)
+      const result = this.opt.source!(this.answers, { requestOpts, pagination })
       thisPromise = Promise.resolve(result)
     } catch (error) {
       thisPromise = Promise.reject(error)
     }
 
-    // Store this promise for check in the callback
     const lastPromise = thisPromise
+    const { data, pagination: newPagination } = await thisPromise
+    if (thisPromise !== lastPromise) return
 
-    return thisPromise.then((choices) => {
-      // If another search is triggered before the current search finishes, don't set results
-      if (thisPromise !== lastPromise) return
+    this.data = validateData(data)
+    if (newPagination) this.ui.pagination = newPagination
+    const selectedIndex = data.findIndex((v: any) => v.value === this.opt?.default)
+    this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
+    this.ui.isLoading = false
+    this.render()
+  }
 
-      this.currentChoices = new Choices(choices)
+  _run(cb: (value: any) => void) {
+    this.done = cb
+    cliCursor.hide()
 
-      const realChoices = choices.filter((choice) => isSelectable(choice))
-      this.nbChoices = realChoices.length
+    const events = observe(this.rl)
+    const dontHaveAnswer = () => this.answer === undefined
+    events.line.pipe(takeWhile(dontHaveAnswer)).forEach(this.onSubmit.bind(this))
+    events.keypress.pipe(takeWhile(dontHaveAnswer)).forEach(this.onKeypress.bind(this))
 
-      const selectedIndex = realChoices.findIndex(
-        (choice) => choice === this.initialValue || choice.value === this.initialValue
-      )
+    this.renderData()
+    return this
+  }
 
-      if (selectedIndex >= 0) {
-        this.selected = selectedIndex
-      }
+  onKeypress(event: KeypressEvent) {
+    const keyName = (event.key && event.key.name) || undefined
 
-      this.searching = false
+    if (event.key.name === 'h' || event.key.sequence === '?' || event.key.sequence === '？') {
+      this.ui.isToggledHelp = !this.ui.isToggledHelp
       this.render()
-    })
+    } else if (event.key.name === 'q') {
+      process.exit(0)
+    }
+    if (this.ui.isToggledHelp) {
+      return
+    } else if (keyName === 'down' || (keyName === 'n' && event.key.ctrl)) {
+      do {
+        this.ui.selectedIndex = this.ui.selectedIndex < this.data.length - 1 ? this.ui.selectedIndex + 1 : 0
+        this.ensureSelectedInRange()
+      } while (!isRowSelectable(this.data[this.ui.selectedIndex]))
+
+      this.render()
+      utils.up(this.rl, 2)
+    } else if (keyName === 'up' || (keyName === 'p' && event.key.ctrl)) {
+      do {
+        this.ui.selectedIndex = this.ui.selectedIndex > 0 ? this.ui.selectedIndex - 1 : this.data.length - 1
+        this.ensureSelectedInRange()
+      } while (!isRowSelectable(this.data[this.ui.selectedIndex]))
+
+      this.render()
+    } else if (this.ui.pagination && keyName === 'left') {
+      if (this.ui.pagination.currentPage > 1) {
+        this.ui.pagination.currentPage--
+        this.renderData()
+      }
+    } else if (this.ui.pagination && keyName === 'right') {
+      if (this.ui.pagination.currentPage < this.ui.pagination.totalPages) {
+        this.ui.pagination.currentPage++
+        this.renderData()
+      }
+    } else if (event.key.sequence === '/') {
+      this.onRequestFilterPrompts()
+    } else if (this.opt.tab && keyName === 'tab') {
+      if (this.tabChoiceList) {
+        const payload = { ...this.requestOpts, [this.tabChoiceKey!]: this.currentTabValue }
+        this.renderData(payload).then(() => this.onTabSwitched())
+      }
+    }
   }
 
   ensureSelectedInRange() {
-    const selectedIndex = Math.min(this.selected, this.nbChoices) // Not above currentChoices length - 1
-    this.selected = Math.max(selectedIndex, 0) // Not below 0
+    const selectedIndex = Math.min(this.ui.selectedIndex, this.data.length) // Not above currentChoices length - 1
+    this.ui.selectedIndex = Math.max(selectedIndex, 0) // Not below 0
   }
 
-  /**
-   * When user type
-   */
+  onSubmit(_line?: string) {
+    this.status = Status.Done
+    this.answer = (this.currentRow.short || this.currentRow.name || this.currentRow.value) ?? this.currentRow.row
+    this.screen.render(`${this.getQuestion()}${pc.cyan(this.answer)}`, '')
 
-  onKeypress(e /* : {key: { name: string, ctrl: boolean }, value: string } */) {
-    let len
-    const keyName = (e.key && e.key.name) || undefined
+    this.screen.done()
+    cliCursor.show()
 
-    if (keyName === 'tab' && this.opt.suggestOnly) {
-      if (this.currentChoices.getChoice(this.selected)) {
-        this.rl.write(ansiEscapes.cursorLeft)
-        const autoCompleted = this.currentChoices.getChoice(this.selected).value
-        this.rl.write(ansiEscapes.cursorForward(autoCompleted.length))
-        this.rl.line = autoCompleted
+    this.done(this.currentRow.value ?? this.currentRow.row)
+  }
+
+  async onTabSwitched() {
+    this.ui.currentTabIndex = this.ui.currentTabIndex++ % this.tabChoiceList!.length
+    this.render()
+  }
+
+  // TODO: 上次设置的值作为当前默认值
+  // TODO: 支持快捷键的树形折叠多列表选择组件
+  async onRequestFilterPrompts() {
+    if (this.opt.sourcePrompts?.length) {
+      const res = await inquirer.prompt(this.opt.sourcePrompts)
+      const confirm = await askForApplyFilters()
+      this.screen.clean(1)
+      if (confirm === 'clear') {
+        this.requestOpts = {}
+      } else if (confirm === 'submit') {
+        if (Object.keys(res).some((key) => res[key] != this.requestOpts[key])) {
+          this.requestOpts = res
+          await this.request()
+        }
+      } else if (confirm === 'cancel') {
         this.render()
       }
-    } else if (keyName === 'down' || (keyName === 'n' && e.key.ctrl)) {
-      len = this.nbChoices
-      this.selected = this.selected < len - 1 ? this.selected + 1 : 0
-      this.ensureSelectedInRange()
-      this.render()
-      utils.up(this.rl, 2)
-    } else if (keyName === 'up' || (keyName === 'p' && e.key.ctrl)) {
-      len = this.nbChoices
-      this.selected = this.selected > 0 ? this.selected - 1 : len - 1
-      this.ensureSelectedInRange()
-      this.render()
-    } else {
-      this.render() // Render input automatically
-      // Only search if input have actually changed, not because of other keypresses
-      if (this.lastSearchTerm !== this.rl.line) {
-        this.search(this.rl.line) // Trigger new search
-      }
     }
+  }
+
+  async renderData(payload = this.requestOpts) {
+    if (this.opt.source) {
+      this.ui.selectedIndex = 0
+
+      await this.request(payload)
+    } else if (this.opt.data) {
+      this.data = validateData(this.opt.data)
+
+      const selectedIndex = this.data.findIndex((row) => row.value === this.opt?.default)
+      this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
+
+      this.ui.isLoading = true
+      this.render()
+    }
+    return
+  }
+
+  render(error?: string) {
+    let content = this.getQuestion()
+    let lines: string[] = []
+    let bottomLines: string[] = []
+    const h = () => this.screen.render(content, lines.join('\n'))
+
+    if (!this.ui.isLoading) renderSpinner(this.spinner, this.ui.isLoading)
+    if (!this.ui.isLoadingOnce && this.ui.isLoading) {
+      // bottomContent += '  ' + pc.dim(this.opt.loadingText || 'Loading...')
+      renderSpinner(this.spinner, this.ui.isLoading, content)
+      this.ui.isLoadingOnce = true
+      return h()
+    }
+
+    if (this.tabChoiceList?.length) lines.push(renderTab(this.tabChoiceList, this.ui.currentTabIndex))
+    if (this?.data?.length) {
+      const { head, body } = renderTable(this.data, this.ui.selectedIndex)
+      lines.push(pc.bgWhite(pc.bold(head[0])))
+
+      if (this.ui.isLoading) renderSpinner(this.spinner, this.ui.isLoading)
+      else {
+        lines.push(this.paginator.paginate(body, this.ui.selectedIndex, this.pageSize))
+        bottomLines.push(this.renderIndicator())
+      }
+      bottomLines.push(renderLine(head[1].length))
+    } else {
+      //   content += this.rl.line
+      lines.push('  ' + pc.yellow(this.opt.emptyText || 'No results...'))
+    }
+
+    bottomLines.push('  ' + this.renderHelpText())
+    lines.push(...bottomLines)
+
+    if (error) {
+      lines = [`${pc.red('>> ')}${error}`]
+      h()
+    }
+
+    h()
+    this.ui.isFirstRender = false
+  }
+
+  renderIndicator() {
+    let res = '\n  ' + pc.dim(`Select ${this.ui.selectedIndex + 1}/${this.data.length} `)
+    if (this.ui.pagination)
+      res += ' · ' + pc.dim(`Page ${this.ui.pagination.currentPage}/${this.ui.pagination.totalPages}`)
+    return res
+  }
+
+  renderHelpText(isToggledHelp: boolean = this.ui.isToggledHelp) {
+    const stickyKeyMap = [
+      { key: '?', desc: 'toggle help' },
+      { key: 'q', desc: 'quit' },
+    ]
+    let keyMap = []
+    if (isToggledHelp) {
+      keyMap.push({ key: `↑/↓`, desc: 'scroll' })
+      if (this.ui.pagination) keyMap.push({ key: `←/→`, desc: 'turn pages' })
+      if (this.opt.sourcePrompts) keyMap.push({ key: `/`, desc: '/' })
+      if (this.opt.tab) keyMap.push({ key: `tab`, desc: 'switch tabs' })
+    }
+    keyMap.push(...stickyKeyMap)
+
+    // return (
+    //   pc.dim('Shortcuts:\n') +
+    //   Table.print(
+    //     sc,
+    //     (item: any, cell) => {
+    //       cell('key', '  ' + pc.cyan(item.key))
+    //       cell('description', '  ' + pc.dim(item.desc))
+    //     },
+    //     (table) => table.print()
+    //   ) +
+    //   '\n'
+    // )
+
+    keyMap = keyMap.map(({ key, desc }) => `${pc.gray(key)} ${pc.dim(pc.gray(desc))}`)
+    return chunk(keyMap, 3)
+      .map((arr) => arr.join(' • '))
+      .join('\n')
   }
 }
 
-function listRender(choices: Array<any>, pointer: string): string {
-  let output = ''
-  let separatorOffset = 0
+const renderTab = (tabs: TabChoiceList, activeIndex: number) => {
+  const seperator = ' | '
+  const res = tabs!
+    .map((choice, index) => {
+      //@ts-ignore
+      const tabName: string = choice.short || choice.name || 'Unknown Tab'
+      return activeIndex === index ? pc.bgCyan(pc.white(tabName)) : tabName
+    })
+    .join(seperator)
+  return ' ' + res
+}
 
-  choices.forEach((choice, index) => {
-    if (choice.type === 'separator') {
-      separatorOffset++
-      output += '  ' + choice + '\n'
-      return
+const renderTable = (rowCollections: Row[], pointer: number) => {
+  const text = Table.print(
+    rowCollections,
+    (item, cell) => {
+      Object.entries(item.row).forEach(([key, value]) => {
+        cell(key, value)
+      })
+    },
+    (table) => {
+      return table.toString().replace(/\n$/, '')
     }
+  ).split('\n')
 
-    if (choice.disabled) {
-      separatorOffset++
-      output += '  - ' + choice.name
-      output += ' (' + (typeof choice.disabled === 'string' ? choice.disabled : 'Disabled') + ')'
-      output += '\n'
-      return
-    }
+  const res = {
+    head: text.slice(0, 2).map((str) => `  ${str}`),
+    body: text
+      .slice(2)
+      .map((rowStr, i) => {
+        if (!isRowSelectable(rowCollections[i])) {
+          return `  ${pc.dim(rowStr)}`
+        }
+        const isSelected = i === pointer
+        return isSelected ? `${pc.cyan(figures.pointer)} ${pc.cyan(rowStr)}` : `  ${rowStr}`
+      })
+      .join('\n'),
+  }
 
-    const isSelected = i - separatorOffset === pointer
-    let line = (isSelected ? figures.pointer + ' ' : '  ') + choice.name
+  return res
+}
 
-    if (isSelected) {
-      line = pc.cyan(line)
-    }
+const renderLine = (strokeSize: number) => {
+  return `${'┈'.repeat(strokeSize)}`
+}
 
-    output += line + ' \n'
+const renderSpinner = (spinner: Ora, isLoading: boolean, currentText?: string) => {
+  if (isLoading) {
+    currentText ? spinner.start(currentText) : spinner.start()
+    // process.stderr.moveCursor(0, -1)
+    // process.stderr.clearLine(1)
+  } else {
+    // const frame = spinner.frame()
+    spinner.stop()
+    spinner.clear()
+    // process.stderr.write(frame)
+  }
+}
+
+const isRowSelectable = (row: Row) => {
+  return !row.disabled
+}
+
+const askForApplyFilters = async () => {
+  const { confirmApply } = await inquirer.prompt({
+    default: true,
+    type: 'expand',
+    name: 'confirmApply',
+    message: 'Confirm submitting those filters?',
+    choices: [
+      { key: 'y', name: 'Submit', value: 'submit' },
+      { key: 'n', name: 'Cancel', value: 'cancel' },
+      new inquirer.Separator(),
+      { key: 'c', name: 'Clear', value: 'clear' },
+    ],
   })
-
-  return output.replace(/\n$/, '')
+  return confirmApply
 }
 
-function isPromise(value: PromiseLike<any>) {
-  return typeof value === 'object' && typeof value.then === 'function'
+const validateData = (collection: Row[]) => {
+  assert.ok(
+    collection.every((row) => row.row),
+    'Every data item must have a `row` property'
+  )
+  return collection
 }
-
-export = TableSelectPrompt
