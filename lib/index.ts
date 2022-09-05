@@ -24,6 +24,7 @@ import utils = require('inquirer/lib/utils/readline')
 import inquirer = require('inquirer')
 import assert = require('assert')
 import cliCursor = require('cli-cursor')
+import merge = require('lodash.merge')
 const debug = Debug('inquirer-table-select:index')
 
 // TODO: 性能优化
@@ -55,10 +56,13 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   protected events!: ReturnType<typeof observe>
   protected observedObjectChange$!: Observable<PropsState>
   protected subscriptions!: Subscription[]
+  protected _portal: any = {}
 
-  get currentTabValue() {
-    //@ts-ignore
-    return this.tabChoiceList![this.ui.currentTabIndex]
+  getTabValue(index = this._ui.currentTabIndex) {
+    const curr = this.tabChoiceList![index]
+    if (typeof curr === 'object') return typeof curr.value !== 'undefined' ? curr.value : curr.name
+    else if (typeof curr !== 'undefined') return curr
+    return null
   }
 
   get currentRow() {
@@ -67,7 +71,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
   constructor(question: inquirer.Question<inquirer.Answers>, rl: ReadLineInterface, answers: inquirer.Answers) {
     super(question, rl, answers)
-    const { data, source, tab } = this.opt
+    const { data, source, tab, filtersDefault } = this.opt
 
     this.opt.default = null // 禁用默认渲染行为
 
@@ -75,6 +79,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     if (!source && ['tree', 'loadingText'].some((v) => v in this.opt)) this.throwParamError('source')
 
     if (tab) this.initTab()
+    if (filtersDefault) merge(this.context, filtersDefault)
   }
 
   initTab(tab = this.opt.tab) {
@@ -86,16 +91,20 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     )
     this.tabChoiceList = children
 
-    if (tab!.default) {
-      const currentTabIndex = children.indexOf(tab!.default)
+    if (tab!.default || (this.opt.filtersDefault && key in this.opt.filtersDefault)) {
+      const currentTabIndex = children.findIndex((child) => {
+        const v = tab!.default || this.opt.filtersDefault![key]
+        if (typeof child === 'object') return (typeof child.value !== 'undefined' ? child.value : child.name) === v
+        else return child === v
+      })
       assert.ok(
         currentTabIndex !== -1,
-        'Property `tab.children` must contain the value you set in property `tab.default`'
+        'Property `tab.children` must contain the value you set in property `tab.default` or property `filtersDefault`'
       )
       this._ui.currentTabIndex = currentTabIndex
     }
 
-    this.context.filters![key] = this.tabChoiceList![this._ui.currentTabIndex]
+    this.context.filters![key] = this.getTabValue()
   }
 
   async _run(cb: (value: any) => void) {
@@ -186,21 +195,27 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     this.ui.selectedIndex = index
   }
   onLeftKey() {
-    const patch = this.opt.prev?.(this.context.pagination!, this.context) || {}
+    const payload = merge({}, this.context)
+    const patch = this.opt.prev?.(payload) || {}
+    merge(payload, patch)
 
-    const payload = { ...this.context, ...patch }
-    this.request(payload).then(() => {
-      this.context = payload
-      this.renderNormal()
+    this.createSpinner(async () => {
+      await this.fetchData(payload).then(() => {
+        this.context = payload
+        this.renderNormal()
+      })
     })
   }
   onRightKey() {
-    const patch = this.opt.next?.(this.context.pagination!, this.context) || {}
+    const payload = merge({}, this.context)
+    const patch = this.opt.next?.(payload) || {}
+    merge(payload, patch)
 
-    const payload = { ...this.context, ...patch }
-    this.request(payload).then(() => {
-      this.context = payload
-      this.renderNormal()
+    this.createSpinner(async () => {
+      await this.fetchData(payload).then(() => {
+        this.context = payload
+        this.renderNormal()
+      })
     })
   }
   onSlashKey() {
@@ -213,7 +228,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
         message: `${this.getQuestion()}
   ${pc.gray('Filters:')}
 `,
-        treeDefault: this.isFiltersFirstRender ? this.context.filters : this.opt.treeDefault,
+        filtersDefault: this.isFiltersFirstRender ? this.context.filters : this.opt.filtersDefault,
       })
       filterPage.subscribe()
 
@@ -223,10 +238,16 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
         if (typeof options === 'object') {
           await this.createSpinner(async () => {
-            const payload = { ...this.context, filters: options }
-            await this.request(payload)
+            const base = this.opt.tab ? { [this.tabChoiceKey!]: this.getTabValue() } : {}
+            const payload = merge({}, this.context, { filters: { ...base, ...options } })
+            await this.createSpinner(async () => {
+              await this.fetchData(payload)
+            })
             this.context = payload
-            if (this.opt.tab && this.opt.tree?.some((node) => node.key === this.tabChoiceKey!)) this.updateTabState()
+
+            if (this.opt.tab) {
+              this.updateTabState()
+            }
             // this.renderNormal()
             // this.subscribe()
           })
@@ -239,13 +260,17 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       this.isFiltersFirstRender = true
     })
   }
+  // TODO: 缓存每一个 Tab 的 Pagination（目前暂时先直接清空 Pagination）
   onTabKey() {
-    if (this.tabChoiceList) {
-      const payload = { ...this.context, [this.tabChoiceKey!]: this.currentTabValue }
-      this.request(payload).then(() => {
-        this.ui.currentTabIndex = (this.ui.currentTabIndex + 1) % this.tabChoiceList!.length
-
+    if (this.tabChoiceList?.length) {
+      this.context.pagination = undefined
+      const nextIndex = (this.ui.currentTabIndex + 1) % this.tabChoiceList!.length
+      const payload = merge({}, this.context, { filters: { [this.tabChoiceKey!]: this.getTabValue(nextIndex) } })
+      this.createSpinner(async () => {
+        await this.fetchData(payload)
+        // console.log(require('util').inspect(payload.pagination, true, Infinity, true))
         this.context = payload
+        this.ui.currentTabIndex = nextIndex
       })
     }
   }
@@ -263,8 +288,25 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   updateTabState() {
     const newTabValue: any = this.context.filters![this.tabChoiceKey!]
 
-    const newTabIndex = this.tabChoiceList!.indexOf(newTabValue)
-    if (newTabIndex !== -1) this._ui.currentTabIndex = newTabIndex
+    let newTabIndex = this._ui.currentTabIndex,
+      flag = 0
+    for (const tab of this.tabChoiceList!) {
+      if (typeof tab === 'object') {
+        const val = typeof tab.value !== 'undefined' ? tab.value : tab.name
+        if (val === newTabValue) {
+          newTabIndex = flag
+          this.ui.currentTabIndex = newTabIndex
+          return
+        }
+      } else if (typeof tab !== 'undefined') {
+        if (tab === newTabValue) {
+          newTabIndex = flag
+          this.ui.currentTabIndex = newTabIndex
+          return
+        }
+      }
+      ++flag
+    }
   }
 
   async fetchData(payload = this.context || {}) {
@@ -277,24 +319,24 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       await this.request(payload)
       //   }
       // )
-      const selectedIndex = this.context.data!.findIndex((v: any) => v.value === this.opt?.default)
+      const selectedIndex = payload.data!.findIndex((v: any) => v.value === this.opt?.default)
       this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
       this.ui.isLoading = false
     } else if (this.opt.data) {
       debug('fetchData start')
       this.ui.isLoading = true
-      this.context.data = validateData(this.opt.data)
-      const selectedIndex = this.context.data.findIndex((row) => row.value === this.opt?.default)
+      payload.data = validateData(this.opt.data)
+      const selectedIndex = payload.data.findIndex((row) => row.value === this.opt?.default)
       this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
       this.ui.isLoading = false
       debug('fetchData end')
     }
   }
 
-  async request(requestOpts = this.context || {}) {
+  async request(payload = this.context || {}) {
     let thisPromise: Promise<TableSelectContext>
     try {
-      const result = this.opt.source!(this.answers, requestOpts)
+      const result = this.opt.source!(this.answers, payload)
       thisPromise = Promise.resolve(result)
     } catch (error) {
       thisPromise = Promise.reject(error)
@@ -307,9 +349,9 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     assert.ok(Array.isArray(data), new Error(`\`Source\` method must return ${pc.green('{ data: Row[] }')}`))
     if (thisPromise !== lastPromise) return
 
-    this.context.data = validateData(data)
-    if (newPagination) this.context.pagination = newPagination
-    this.context = { ...this.context, ...rest }
+    payload.data = validateData(data)
+    payload.pagination = newPagination || {}
+    merge(payload, rest)
   }
 
   renderNormal(error?: string) {
@@ -337,9 +379,19 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
         bottomLines.push(this.renderIndicator(len))
       }
       bottomLines.push(renderLine(len))
+      this._portal.len = len
+      this._portal.head = pc.bgWhite(pc.bold(head[0]))
     } else {
       //   content += this.rl.line
-      lines.push('  ' + pc.yellow(this.opt.emptyText || 'No results...'))
+      if (this._portal.head) lines.push(this._portal.head)
+      if (this.ui.isLoading) lines.push('  ' + pc.dim(this.opt.loadingText || 'Loading...'))
+      else {
+        lines.push('  ' + pc.yellow(this.opt.emptyText || 'No results...'))
+      }
+      if (this._portal.len) {
+        bottomLines.push(this.renderIndicator(this._portal.len))
+        bottomLines.push(renderLine(this._portal.len))
+      }
     }
 
     bottomLines.push('  ' + this.renderHelpText())
@@ -349,7 +401,8 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   }
 
   renderIndicator(limitSize: number) {
-    let left = '  ' + `Select ${this.ui.selectedIndex + 1}/${this.context.data!.length}`
+    let left = ''
+    if (this.context.data?.length) left += '  ' + `Select ${this.ui.selectedIndex + 1}/${this.context.data!.length}`
     let right = ''
     if (this.context.pagination) {
       const { currentPage, totalPages, hasNextPage, hasPreviousPage } = this.context.pagination

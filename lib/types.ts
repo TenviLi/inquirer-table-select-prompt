@@ -17,7 +17,7 @@ export interface ResponsePagination extends Record<string, unknown> {
   hasNextPage?: boolean
 }
 
-export interface TableSelectContext<T = Row[]> {
+export interface TableSelectContext<T = Row[]> extends Record<string, unknown> {
   data?: T
   pagination?: ResponsePagination
   filters?: Record<string, unknown>
@@ -32,7 +32,7 @@ export interface TableSelectConfig<T extends Row = Row> {
 
   source?: (answers: inquirer.Answers, context?: TableSelectContext) => AsPromise<TableSelectContext>
   tree?: TreeNode[]
-  treeDefault?: Object
+  filtersDefault?: Record<string, unknown>
   tab?: TreeNode & { key: string; default?: any; children: Array<string | number | boolean> }
 
   loadingText?: string
@@ -41,8 +41,8 @@ export interface TableSelectConfig<T extends Row = Row> {
   loop?: boolean
   pageSize?: number
 
-  prev?: (lastPagination: ResponsePagination, context?: TableSelectContext) => TableSelectContext | null | undefined
-  next?: (lastPagination: ResponsePagination, context?: TableSelectContext) => TableSelectContext | null | undefined
+  prev?: (context?: TableSelectContext) => TableSelectContext | null | undefined
+  next?: (context?: TableSelectContext) => TableSelectContext | null | undefined
 
   // pagination?: ResponsePagination
 }

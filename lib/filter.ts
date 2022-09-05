@@ -37,7 +37,7 @@ type UnNormalized = AsFunction<Array<TreeNode | string> | TreeNode>
 interface Options {
   pageSize?: number
   tree: UnNormalized
-  treeDefault?: any
+  filtersDefault?: any
   loop?: boolean
   message: string
   multiple?: boolean
@@ -145,7 +145,7 @@ export class FilterPage {
       await prepareChildren(node)
     }
 
-    if (this.opt.treeDefault) {
+    if (this.opt.filtersDefault) {
       await this.initSelections(tree as TreeNode<Normalized>)
     }
 
@@ -334,7 +334,7 @@ export class FilterPage {
     return generateHelpText({ keyMap, isToggledHelp, hideKeyMap, width: terminalSize().columns })
   }
 
-  async initSelections(node: TreeNode<Normalized> = this.tree, def = this.opt.treeDefault, _defPath: string = '') {
+  async initSelections(node: TreeNode<Normalized> = this.tree, def = this.opt.filtersDefault, _defPath: string = '') {
     const processedChildren =
       node?.children?.reduce((prev, child) => {
         prev[child.key!] = child
