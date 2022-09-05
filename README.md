@@ -12,7 +12,7 @@
 
 而我更需要的是类似 list/rawlist 的选中表格每一行效果.
 
-因此我开发了一个支持表格行选中的插件，并在这个核心功能的基础上，还添加了诸如 filters, tab, filtersDefault, pagination 等丰富特性.
+因此我开发了一个支持表格行选中的插件，并在这个核心功能的基础上，还添加了诸如 过滤器(`filters`)、过滤器选项卡(`tab`)、过滤器默认值(`filtersDefault`)、分页器(`pagination`)、异步请求数据源(`source`)、直接使用数据(`data`) 等丰富特性.
 
 其中，filters 功能基于 [insightfuls/inquirer-tree-prompt](https://github.com/insightfuls/inquirer-tree-prompt) 二次开发.
 
@@ -25,7 +25,7 @@ $ npm i inquirer-table-select-prompt
 ## 使用
 
 ```typescript
-inquirer.registerPrompt('table-selct', require('inquirer-table-select-prompt'))
+inquirer.registerPrompt('table-select', require('inquirer-table-select-prompt'))
 ```
 
 ## 例子
