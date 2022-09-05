@@ -44,18 +44,51 @@ export function isShallowEqual(objA: any, objB: any): boolean {
 }
 export const SEPERATOR_CHAR = ' • '
 export type Shortcut = { key: string; desc: string }
-export function generateHelpText(keyMap: Shortcut[], isToggledHelp: boolean) {
-  const map: Shortcut[] = []
-  const stickyKeyMap = [
-    !isToggledHelp ? { key: '?', desc: 'toggle help' } : { key: pc.cyan('?'), desc: pc.cyan('toggle help') },
-    // { key: 'q', desc: 'quit' },
-  ]
-  if (isToggledHelp) {
-    map.push(...keyMap)
-  }
-  map.push(...stickyKeyMap)
+type HelpTextOptions = {
+  isToggledHelp?: boolean
+  keyMap?: Shortcut[]
+  hideKeyMap?: Shortcut[]
+  width?: number
+}
+export function generateHelpText(options: HelpTextOptions): string {
+  const { isToggledHelp = false, keyMap = [], hideKeyMap = [], width = Infinity } = options
 
-  const lines = map.map(({ key, desc }) => `${pc.gray(key)} ${pc.gray(pc.dim(desc))}`)
-  // return chunk(lines, 3).map((arr) => arr.join(SEPERATOR_CHAR)).join('\n')
-  return lines.join(SEPERATOR_CHAR)
+  const finalKeyMap = []
+  if (hideKeyMap.length)
+    finalKeyMap.push(
+      !isToggledHelp ? { key: '?', desc: 'toggle help' } : { key: pc.cyan('?'), desc: pc.cyan('toggle help') }
+    )
+  finalKeyMap.push(...keyMap)
+  if (isToggledHelp) {
+    finalKeyMap.push(...hideKeyMap)
+  }
+
+  const tempLength = [0]
+  const chunks = finalKeyMap
+    .map(({ key, desc }) => `${pc.gray(pc.bold(key))} ${pc.dim(desc)}`)
+    // return chunk(lines, 3).map((arr) => arr.join(SEPERATOR_CHAR)).join('\n')
+    // return chunks.join(SEPERATOR_CHAR)
+    .reduce(
+      (lines, word) => {
+        const curr = lines.length - 1
+        const wordLength = replaceAnsi(word).length
+        if (wordLength + tempLength[curr] > width) {
+          lines.push([word])
+          tempLength[curr] += wordLength
+        } else {
+          lines[curr].push(word)
+          tempLength[curr] += SEPERATOR_CHAR.length + wordLength
+        }
+        return lines
+      },
+      [[]] as string[][]
+    )
+    .map((words) => words.join(SEPERATOR_CHAR))
+
+  return chunks.join('\n')
+}
+
+function replaceAnsi(str: string) {
+  const ansiEscapeSequence = /\u001b.*?m/g
+  return str.replace(ansiEscapeSequence, '')
 }

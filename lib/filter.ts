@@ -2,19 +2,22 @@ import figures from 'figures'
 import cloneDeep from 'lodash.clonedeep'
 import merge from 'lodash.merge'
 import type { Interface as ReadLineInterface } from 'readline'
-import { KeypressEvent } from './types'
+import type { Subscription } from 'rxjs'
+import terminalSize from 'term-size'
+import type { KeypressEvent } from './types'
+import { generateHelpText, Shortcut } from './utils/common'
 import Paginator from './utils/paginator'
 import pc = require('picocolors')
 import type ScreenManager = require('inquirer/lib/utils/screen-manager')
-import { generateHelpText, Shortcut } from './utils/common'
 import assert = require('assert')
+import observe = require('inquirer/lib/utils/events')
 
 type AsFunction<T> = T | ((...args: any[]) => T)
 
 export interface TreeNode<T = Normalized> {
   name?: string
   key?: string
-  value?: unknown
+  value?: any
   short?: string
   children?: T
 
@@ -22,6 +25,7 @@ export interface TreeNode<T = Normalized> {
   _parent?: TreeNode
   _prepared?: boolean
 
+  _root?: TreeNode
   _isRoot?: boolean
   _selectedNode?: TreeNode[]
   [key: string]: unknown
@@ -33,6 +37,7 @@ type UnNormalized = AsFunction<Array<TreeNode | string> | TreeNode>
 interface Options {
   pageSize?: number
   tree: UnNormalized
+  treeDefault?: any
   loop?: boolean
   message: string
   multiple?: boolean
@@ -47,9 +52,17 @@ export class FilterPage {
   protected active!: TreeNode
   protected selectedList: TreeNode[] = []
   protected shownList: TreeNode[] = []
+
+  protected subscriptions!: Subscription[]
   // TODO: 如果root节点open了：选中过的子节点的整个path上的所有父节点都open
   // TODO: 给定初始默认值，映射到 selectedList
-  constructor(public rl: ReadLineInterface, public screen: ScreenManager, public opt: Options) {
+
+  constructor(
+    public rl: ReadLineInterface,
+    public screen: ScreenManager,
+    public events: ReturnType<typeof observe>,
+    public opt: Options
+  ) {
     this.opt = {
       pageSize: 15,
       multiple: false,
@@ -133,7 +146,27 @@ export class FilterPage {
     }
 
     this.tree = tree as TreeNode<Normalized>
+    if (this.opt.treeDefault) {
+      await this.initSelections(this.tree as TreeNode<Normalized>)
+    }
+
     this.render()
+  }
+
+  subscribe(events: ReturnType<typeof observe> = this.events) {
+    // const dontReset = () => this.filterPage !== null
+    const subEventsLine = events.line
+      // .pipe(takeWhile(dontReset))
+      .subscribe(this.onSubmit.bind(this))
+    const subEventsKeypress = events.keypress
+      // .pipe(takeWhile(dontReset))
+      .subscribe(this.onKeypress.bind(this))
+
+    this.subscriptions = [subEventsLine, subEventsKeypress]
+  }
+
+  unsubscribe(subscriptions = this.subscriptions || []) {
+    subscriptions?.forEach((sub) => sub.unsubscribe())
   }
 
   // TODO: 数据结构从flatten数组解析为chained对象
@@ -167,14 +200,13 @@ export class FilterPage {
     // }
     message += '\n' + this.paginator.paginate(treeContent, this.shownList.indexOf(this.active), this.opt.pageSize!)
 
-    let bottomContent = ''
-    bottomContent += '  ' + this.renderHelpText()
+    message += '\n' + '  ' + this.renderHelpText()
 
-    this.screen.render(message, bottomContent)
+    this.screen.render(message, '')
   }
 
   // TODO: 子节点选中后，其他兄弟子节点置灰处理（？）
-  createTreeContent(node: TreeNode = this.tree, indent = 2) {
+  createTreeContent(node: TreeNode = this.tree, indent = 0) {
     const children: TreeNode[] = node.children || []
     let output = ''
     children.forEach((child) => {
@@ -193,6 +225,7 @@ export class FilterPage {
 
       if (isRoot) {
         if (_selectedNode?.length) suffix += pc.cyan(_selectedNode!.map((item) => shortFor(item)).join(', '))
+        prefix += `${pc.green('?')} `
       } else {
         const rootNode = recursiveFindRootNode(child)
         // if (this.opt.multiple) {
@@ -291,13 +324,51 @@ export class FilterPage {
 
   renderHelpText(isToggledHelp: boolean = this.isToggledHelp) {
     const keyMap: Shortcut[] = [
-      { key: '←/→', desc: 'expand/collapse' },
+      { key: 'esc', desc: 'exit' },
+      { key: 'tab', desc: 'toggle' },
       { key: 'space', desc: 'select' },
       { key: 'enter', desc: 'confirm' },
       { key: 'backspace', desc: 'clear' },
-      { key: 'esc', desc: 'exit' },
     ]
-    return generateHelpText(keyMap, isToggledHelp)
+    const hideKeyMap: Shortcut[] = []
+    return generateHelpText({ keyMap, isToggledHelp, hideKeyMap, width: terminalSize().columns })
+  }
+
+  async initSelections(node: TreeNode<Normalized> = this.tree, def = this.opt.treeDefault, _defPath: string = '') {
+    await runChildrenFunctionIfRequired(node)
+    const processedChildren =
+      node?.children?.reduce((prev, child) => {
+        prev[child.key!] = child
+        return prev
+      }, {} as Record<string, TreeNode>) || {}
+
+    for (const key in def) {
+      const defPath = _defPath + (_defPath ? `.${key}` : key)
+
+      if (key in processedChildren) {
+        if (typeof def[key] === 'object') {
+          if (Array.isArray(processedChildren[key]?.children)) {
+            processedChildren[key].open = true
+            await this.initSelections(processedChildren[key], def[key], defPath)
+          } else {
+            throw new Error(`property \`tree\` key \`${defPath}\` not found children nodes`)
+          }
+        } else {
+          if (processedChildren[key]?.children!.filter((child) => valueFor(child) == def[key])) {
+            const rootNode = recursiveFindRootNode(processedChildren[key])
+            if (processedChildren[key]) rootNode._selectedNode!.push(processedChildren[key])
+          } else {
+            throw new Error(
+              `property \`tree\` key \`${defPath}\` value must equal to ${pc.green(def[key])}, not ${pc.red(
+                valueFor(processedChildren[key]) as string
+              )}`
+            )
+          }
+        }
+      } else {
+        throw new Error(`property \`tree\` not found key \`${defPath}\``)
+      }
+    }
   }
 }
 
@@ -376,9 +447,14 @@ const valueFor = (node: TreeNode) => {
 
 const recursiveFindRootNode = (node: TreeNode) => {
   let side = node
+  if (side._root) return side._root
+
   while (side && !side._isRoot) {
     side = side._parent!
+    // if (side._root) return side._root
   }
+
+  node._root = side
   return side
 }
 

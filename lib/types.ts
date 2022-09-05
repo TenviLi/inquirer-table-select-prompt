@@ -29,6 +29,7 @@ export interface TableSelectConfig<T extends Row = Row> {
     context?: Record<string, unknown>
   ) => Promise<SourceType<Row[]>> | SourceType<Row[]>
   tree?: TreeNode[]
+  treeDefault?: Object
   tab?: TreeNode
 
   loadingText?: string
@@ -37,8 +38,8 @@ export interface TableSelectConfig<T extends Row = Row> {
   loop?: boolean
   pageSize?: number
 
-  prev?: (context: Record<string, unknown>) => void
-  next?: (context: Record<string, unknown>) => void
+  prev?: (prevPagination: ResponsePagination) => ResponsePagination | null | undefined
+  next?: (prevPagination: ResponsePagination) => ResponsePagination | null | undefined
   cache?: boolean
 }
 

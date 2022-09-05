@@ -5,9 +5,12 @@ import Debug from 'debug'
 import Table from 'easy-table'
 import figures from 'figures'
 import isPlainObject from 'lodash.isplainobject'
+import merge from 'lodash.merge'
 import memoizeOne from 'memoize-one'
 import type { Interface as ReadLineInterface } from 'readline'
-import { takeWhile } from 'rxjs/operators'
+import type { Observable, Subscription } from 'rxjs'
+import { filter, takeWhile } from 'rxjs/operators'
+import terminalSize from 'term-size'
 import type { TreeNode } from './filter'
 import { FilterPage } from './filter'
 import type { KeypressEvent, PropsState, ResponsePagination, Row, SourceType, TableSelectConfig } from './types'
@@ -23,7 +26,6 @@ import inquirer = require('inquirer')
 import assert = require('assert')
 import cliCursor = require('cli-cursor')
 const debug = Debug('inquirer-table-select:index')
-import merge = require('lodash.merge')
 
 // TODO: inquirer 的各种方法 支持 async，支持各种字段比如 filter transformer 等
 export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Question> {
@@ -49,10 +51,13 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
   protected data: Row[] = []
 
-  protected requestOpts: Record<string, unknown> = {}
+  protected isFiltersFirstRender: boolean = false
+  protected requestContext: Record<string, unknown> = {}
   protected router: Router = Router.NORMAL
-  protected filterPage?: FilterPage
+  // protected filterPage: FilterPage | null = null
   protected events!: ReturnType<typeof observe>
+  protected observedObjectChange$!: Observable<PropsState>
+  protected subscriptions!: Subscription[]
 
   get currentTabValue() {
     //@ts-ignore
@@ -79,18 +84,13 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     }
   }
 
-  render() {
-    if (this.router === Router.NORMAL) {
-      this.renderNormal()
-    }
-  }
-
   async _run(cb: (value: any) => void) {
     this.done = cb
     cliCursor.hide()
 
     const [observedObject, observedObjectChange$] = observeObject(this._ui)
     this.ui = observedObject
+    this.observedObjectChange$ = observedObjectChange$
 
     await this.createSpinner(async () => {
       await this.fetchData()
@@ -99,25 +99,36 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     debug('_run')
     this.renderNormal()
 
-    observedObjectChange$.subscribe((changes: any) => {
-      debug(changes)
-      this.renderNormal()
-    })
-
     const events = observe(this.rl)
     this.events = events
-    this._subscribe(events)
+    this.subscribe()
 
     return this
   }
 
-  _subscribe(events: ReturnType<typeof observe>) {
-    events.line
-      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined && this._ui.isLoading === true))
-      .forEach(this.onSubmit.bind(this))
-    events.keypress
-      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined && this._ui.isLoading === true))
-      .forEach(this.onKeypress.bind(this))
+  subscribe(events: ReturnType<typeof observe> = this.events) {
+    const dontHaveAnswer = () => this.answer === undefined
+    const filterLoadings = () => this.ui.isLoading === false
+
+    const subObjectChange = this.observedObjectChange$
+      .pipe(takeWhile(dontHaveAnswer), filter(filterLoadings))
+      .subscribe((changes: any) => {
+        debug(changes)
+        this.renderNormal()
+      })
+
+    const subEventsLine = events.line
+      .pipe(takeWhile(dontHaveAnswer), filter(filterLoadings))
+      .subscribe(this.onSubmit.bind(this))
+    const subEventsKeypress = events.keypress
+      .pipe(takeWhile(dontHaveAnswer), filter(filterLoadings))
+      .subscribe(this.onKeypress.bind(this))
+
+    this.subscriptions = [subObjectChange, subEventsLine, subEventsKeypress]
+  }
+
+  unsubscribe(subscriptions = this.subscriptions || []) {
+    subscriptions?.forEach((sub) => sub.unsubscribe())
   }
 
   onKeypress(event: KeypressEvent) {
@@ -142,40 +153,50 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       } while (!isRowSelectable(this.data[index]))
       this.ui.selectedIndex = index
     } else if (this.pagination?.hasPreviousPage && this.opt.prev && keyName === 'left') {
-      this.opt.prev?.(this.requestOpts)
-      this.fetchData()
+      const pagination = this.opt.prev?.(this.pagination) || {}
+      this.request({ ...this.requestContext, pagination }).then(() => {
+        merge(this.requestContext, { pagination })
+        this.renderNormal()
+      })
     } else if (this.pagination?.hasNextPage && this.opt.next && keyName === 'right') {
-      this.opt.next?.(this.requestOpts)
-      this.fetchData()
+      const pagination = this.opt.next?.(this.pagination) || {}
+      this.request({ ...this.requestContext, pagination }).then(() => {
+        merge(this.requestContext, { pagination })
+        this.renderNormal()
+      })
     } else if (this.opt.tree && (event.key.sequence === '/' || keyName === 'f')) {
       this.router = Router.FILTER
-      this.filterPage = new FilterPage(this.rl, this.screen, {
-        tree: this.opt.tree,
-        message: `${this.getQuestion()}
-  Filters:
-`,
-      })
+      this.unsubscribe()
 
       this.createSpinner(async () => {
-        await this.filterPage?._run((options: any) => {
-          this.router = Router.NORMAL
-          this.filterPage = undefined
-          merge(this.requestOpts, options)
-          this.renderNormal()
-          this._subscribe(this.events)
+        const filterPage = new FilterPage(this.rl, this.screen, this.events, {
+          tree: this.opt.tree!,
+          message: `${this.getQuestion()}
+  ${pc.gray('Filters:')}
+`,
+          treeDefault: this.isFiltersFirstRender ? this.requestContext : this.opt.treeDefault,
         })
-      }).then(() => {
-        this.events.keypress
-          .pipe(takeWhile(() => this.router === Router.FILTER && this.filterPage !== undefined))
-          .forEach(this.filterPage!.onKeypress.bind(this.filterPage!))
-        this.events.line
-          .pipe(takeWhile(() => this.router === Router.FILTER && this.filterPage !== undefined))
-          .forEach(this.filterPage!.onSubmit.bind(this.filterPage!))
+        filterPage.subscribe()
+
+        await filterPage!._run(async (options: Object = {}) => {
+          this.router = Router.NORMAL
+          filterPage!.unsubscribe()
+          await this.createSpinner(async () => {
+            await this.request({ ...this.requestContext, ...options })
+            merge(this.requestContext, options)
+
+            this.renderNormal()
+            this.subscribe()
+          })
+        })
       })
     } else if (this.opt.tab && keyName === 'tab') {
       if (this.tabChoiceList) {
-        const payload = { ...this.requestOpts, [this.tabChoiceKey!]: this.currentTabValue }
-        this.request(payload).then(() => this.onTabSwitched())
+        const payload = { ...this.requestContext, [this.tabChoiceKey!]: this.currentTabValue }
+        this.request(payload).then(() => {
+          this.onTabSwitched()
+          merge(this.requestContext, { [this.tabChoiceKey!]: this.currentTabValue })
+        })
       }
     }
   }
@@ -195,7 +216,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     this.ui.currentTabIndex = (this.ui.currentTabIndex + 1) % this.tabChoiceList!.length
   }
 
-  async fetchData(payload = this.requestOpts) {
+  async fetchData(payload = this.requestContext) {
     if (this.opt.source) {
       debug('renderData::source')
       this.ui.selectedIndex = 0
@@ -219,7 +240,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     }
   }
 
-  async request(requestOpts = this.requestOpts || {}) {
+  async request(requestOpts = this.requestContext || {}) {
     let thisPromise: Promise<SourceType>
     try {
       const result = this.opt.source!(this.answers, { requestOpts })
@@ -232,7 +253,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     const res = await thisPromise
     assert.ok(isPlainObject(res), new Error('`Source` method need to return a plain object'))
     const { data, pagination: newPagination } = res
-    assert.ok(Array.isArray(data), new Error('`Source` method need to return { data: Row[] }'))
+    assert.ok(Array.isArray(data), new Error(`\`Source\` method need to return ${pc.green('{ data: Row[] }')}`))
     if (thisPromise !== lastPromise) return
 
     this.data = validateData(data)
@@ -280,7 +301,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     let right = ''
     if (this.pagination) {
       const { currentPage, totalPages, hasNextPage, hasPreviousPage } = this.pagination
-      if (currentPage && totalPages)
+      if (typeof currentPage === 'number' && typeof totalPages === 'number')
         left += SEPERATOR_CHAR + `Page ${this.pagination.currentPage}/${this.pagination.totalPages}`
 
       const rightChunk = []
@@ -302,15 +323,16 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   }
 
   renderHelpText(isToggledHelp: boolean = this.ui.isToggledHelp) {
-    const keyMap: Shortcut[] = [
+    const hideKeyMap: Shortcut[] = [
       { key: 'q', desc: 'quit' },
       { key: `enter`, desc: 'submit' },
-      { key: `↑/↓`, desc: 'scroll' },
+      // { key: `↕`, desc: 'scroll' },
     ]
-    if (this.pagination) keyMap.push({ key: `←/→`, desc: 'turn pages' })
+    const keyMap: Shortcut[] = []
+    if (this.pagination) keyMap.push({ key: `↔`, desc: 'turn pages' })
     if (this.opt.tree) keyMap.push({ key: `/`, desc: 'filters' })
     if (this.opt.tab) keyMap.push({ key: `tab`, desc: 'switch tabs' })
-    return generateHelpText(keyMap, isToggledHelp)
+    return generateHelpText({ keyMap, isToggledHelp, hideKeyMap, width: terminalSize().columns })
   }
 
   createSpinner = async (func: () => Promise<void>) => {
