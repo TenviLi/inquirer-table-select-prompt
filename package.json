@@ -7,7 +7,10 @@
     "lib": "lib"
   },
   "scripts": {
-    "dev": "tsc -w",
+    "build": "tsc --build ./tsconfig.json",
+    "clean": "tsc --build --clean",
+    "prepublishOnly": "npm run clean && npm run build",
+    "watch": "tsc --watch",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -24,6 +27,7 @@
     "inquirer-plugin",
     "inquirer-prompt",
     "inquirer",
+    "prompt",
     "filtering",
     "table",
     "table-select",
