@@ -1,27 +1,36 @@
 // import ansiEscapes from 'ansi-escapes'
 // const runAsync = require('run-async')
-// import _debounce = require('lodash.debounce')
-import type { Ora } from 'ora'
-import ora = require('ora')
+import type { Interface as ReadLineInterface } from 'readline'
+import { takeWhile } from 'rxjs/operators'
+import type {
+  KeypressEvent,
+  PropsState,
+  RequestPagination,
+  Row,
+  SourceType,
+  TabChoiceList,
+  TableSelectConfig,
+} from './types'
+import { Status } from './types'
+import { chunk } from './utils/common'
+import { observeObject } from './utils/observe'
+import { Paginator } from './utils/paginator'
 import pc = require('picocolors')
-import figures = require('figures')
+import figures from 'figures'
 import Base = require('inquirer/lib/prompts/base')
 import observe = require('inquirer/lib/utils/events')
 import utils = require('inquirer/lib/utils/readline')
-import Paginator from './utils/paginator'
-import { takeWhile } from 'rxjs/operators'
-import Table = require('easy-table')
+import Table from 'easy-table'
 import inquirer = require('inquirer')
 import assert = require('assert')
 import cliCursor = require('cli-cursor')
-import type { Interface as ReadLineInterface } from 'readline'
-import type { KeypressEvent, Row, SourceType, PropsState, TabChoiceList, TableSelectConfig } from './types'
-import { Status } from './types'
-import { chunk } from './utils/common'
+import memoizeOne from 'memoize-one'
+import Debug from 'debug'
+const debug = Debug('inquirer-table-select:index')
+import { arc as dots } from 'cli-spinners'
 
 export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Question> {
-  protected pageSize: number = this.opt.pageSize || 10
-  protected spinner: Ora = ora({ text: this.opt.loadingText || 'Loading...', discardStdin: false })
+  protected pageSize: number = this.opt.pageSize || 15
   protected readonly paginator = new Paginator(this.screen, {
     isInfinite: this.opt.loop === undefined ? true : this.opt.loop,
     isShowHelp: false,
@@ -29,15 +38,14 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   protected tabChoiceKey?: string
   protected tabChoiceList?: TabChoiceList
 
-  protected ui: PropsState = {
-    isLoadingOnce: false,
+  protected _ui: PropsState = {
     isLoading: true,
-    isFirstRender: true,
     isToggledHelp: false,
     selectedIndex: 0,
     currentTabIndex: 0,
-    pagination: null,
   }
+  protected ui!: PropsState
+  protected pagination?: RequestPagination
   public status = Status.Pending
   protected answer: any
   protected done!: (value: any) => void
@@ -73,92 +81,86 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     }
   }
 
-  async request(requestOpts = this.requestOpts || {}, pagination = this.ui.pagination) {
-    this.ui.isLoading = true
-    this.render()
-
-    let thisPromise: Promise<SourceType>
-    try {
-      const result = this.opt.source!(this.answers, { requestOpts, pagination })
-      thisPromise = Promise.resolve(result)
-    } catch (error) {
-      thisPromise = Promise.reject(error)
-    }
-
-    const lastPromise = thisPromise
-    const { data, pagination: newPagination } = await thisPromise
-    if (thisPromise !== lastPromise) return
-
-    this.data = validateData(data)
-    if (newPagination) this.ui.pagination = newPagination
-    const selectedIndex = data.findIndex((v: any) => v.value === this.opt?.default)
-    this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
-    this.ui.isLoading = false
-    this.render()
-  }
-
   _run(cb: (value: any) => void) {
     this.done = cb
     cliCursor.hide()
 
-    const events = observe(this.rl)
-    const dontHaveAnswer = () => this.answer === undefined
-    events.line.pipe(takeWhile(dontHaveAnswer)).forEach(this.onSubmit.bind(this))
-    events.keypress.pipe(takeWhile(dontHaveAnswer)).forEach(this.onKeypress.bind(this))
+    const [observedObject, observedObjectChange$] = observeObject(this._ui)
+    this.ui = observedObject
 
-    this.renderData()
+    const content = this.getQuestion()
+    let spinnerIndex = 0
+    const spinner = setInterval(() => {
+      spinnerIndex++
+
+      if (spinnerIndex >= dots.frames.length) {
+        spinnerIndex = 0
+      }
+
+      const spinnerFrame = dots.frames[spinnerIndex]
+      this.screen.render(content.replace(pc.green('?'), pc.blue(spinnerFrame)), '')
+    }, dots.interval)
+
+    this.fetchData().then(() => {
+      clearInterval(spinner)
+      debug('_run')
+      this.render()
+
+      observedObjectChange$.subscribe((changes: any) => {
+        debug(changes)
+        this.render()
+      })
+
+      const events = observe(this.rl)
+      const dontHaveAnswer = () => this.answer === undefined
+      events.line.pipe(takeWhile(dontHaveAnswer)).forEach(this.onSubmit.bind(this))
+      events.keypress.pipe(takeWhile(dontHaveAnswer)).forEach(this.onKeypress.bind(this))
+    })
     return this
   }
 
   onKeypress(event: KeypressEvent) {
     const keyName = (event.key && event.key.name) || undefined
 
+    if (event.key.name === 'q') process.exit(0)
+
+    if (this.ui.isToggledHelp) return
     if (event.key.name === 'h' || event.key.sequence === '?' || event.key.sequence === '？') {
       this.ui.isToggledHelp = !this.ui.isToggledHelp
-      this.render()
-    } else if (event.key.name === 'q') {
-      process.exit(0)
-    }
-    if (this.ui.isToggledHelp) {
-      return
+      // this.render()
     } else if (keyName === 'down' || (keyName === 'n' && event.key.ctrl)) {
+      let index = this.ui.selectedIndex
       do {
-        this.ui.selectedIndex = this.ui.selectedIndex < this.data.length - 1 ? this.ui.selectedIndex + 1 : 0
-        this.ensureSelectedInRange()
-      } while (!isRowSelectable(this.data[this.ui.selectedIndex]))
-
-      this.render()
+        index = index < this.data.length - 1 ? index + 1 : 0
+      } while (!isRowSelectable(this.data[index]))
+      this.ui.selectedIndex = index
       utils.up(this.rl, 2)
+      // this.render()
     } else if (keyName === 'up' || (keyName === 'p' && event.key.ctrl)) {
+      let index = this.ui.selectedIndex
       do {
-        this.ui.selectedIndex = this.ui.selectedIndex > 0 ? this.ui.selectedIndex - 1 : this.data.length - 1
-        this.ensureSelectedInRange()
-      } while (!isRowSelectable(this.data[this.ui.selectedIndex]))
-
-      this.render()
-    } else if (this.ui.pagination && keyName === 'left') {
-      if (this.ui.pagination.currentPage > 1) {
-        this.ui.pagination.currentPage--
-        this.renderData()
+        index = index > 0 ? index - 1 : this.data.length - 1
+      } while (!isRowSelectable(this.data[index]))
+      this.ui.selectedIndex = index
+      // this.render()
+    } else if (this.pagination && keyName === 'left') {
+      if (this.pagination.currentPage > 1) {
+        this.pagination.currentPage--
+        this.fetchData()
       }
-    } else if (this.ui.pagination && keyName === 'right') {
-      if (this.ui.pagination.currentPage < this.ui.pagination.totalPages) {
-        this.ui.pagination.currentPage++
-        this.renderData()
+    } else if (this.pagination && keyName === 'right') {
+      if (this.pagination.currentPage < this.pagination.totalPages) {
+        this.pagination.currentPage++
+        this.fetchData()
       }
     } else if (event.key.sequence === '/') {
       this.onRequestFilterPrompts()
     } else if (this.opt.tab && keyName === 'tab') {
       if (this.tabChoiceList) {
         const payload = { ...this.requestOpts, [this.tabChoiceKey!]: this.currentTabValue }
-        this.renderData(payload).then(() => this.onTabSwitched())
+        this.request(payload).then(() => this.onTabSwitched())
       }
     }
-  }
-
-  ensureSelectedInRange() {
-    const selectedIndex = Math.min(this.ui.selectedIndex, this.data.length) // Not above currentChoices length - 1
-    this.ui.selectedIndex = Math.max(selectedIndex, 0) // Not below 0
   }
 
   onSubmit(_line?: string) {
@@ -174,12 +176,12 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
   async onTabSwitched() {
     this.ui.currentTabIndex = this.ui.currentTabIndex++ % this.tabChoiceList!.length
-    this.render()
+    // this.render()
   }
 
-  // TODO: 上次设置的值作为当前默认值
-  // TODO: 支持快捷键的树形折叠多列表选择组件
   async onRequestFilterPrompts() {
+    // TODO: 上次设置的值作为当前默认值
+    // TODO: 支持快捷键的树形折叠多列表选择组件
     if (this.opt.sourcePrompts?.length) {
       const res = await inquirer.prompt(this.opt.sourcePrompts)
       const confirm = await askForApplyFilters()
@@ -197,43 +199,64 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     }
   }
 
-  async renderData(payload = this.requestOpts) {
+  async fetchData(payload = this.requestOpts) {
     if (this.opt.source) {
+      debug('renderData::source')
       this.ui.selectedIndex = 0
-
+      this.ui.isLoading = true
       await this.request(payload)
+      const selectedIndex = this.data.findIndex((v: any) => v.value === this.opt?.default)
+      this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
+      this.ui.isLoading = false
     } else if (this.opt.data) {
+      debug('fetchData start')
+      this.ui.isLoading = true
       this.data = validateData(this.opt.data)
-
       const selectedIndex = this.data.findIndex((row) => row.value === this.opt?.default)
       this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
-
-      this.ui.isLoading = true
-      this.render()
+      this.ui.isLoading = false
+      debug('fetchData end')
+      // this.render()
     }
-    return
+  }
+
+  async request(requestOpts = this.requestOpts || {}, pagination = this.pagination) {
+    let thisPromise: Promise<SourceType>
+    try {
+      const result = this.opt.source!(this.answers, { requestOpts, pagination })
+      thisPromise = Promise.resolve(result)
+    } catch (error) {
+      thisPromise = Promise.reject(error)
+    }
+
+    const lastPromise = thisPromise
+    const { data, pagination: newPagination } = await thisPromise
+    if (thisPromise !== lastPromise) return
+
+    this.data = validateData(data)
+    if (newPagination) this.pagination = newPagination
   }
 
   render(error?: string) {
+    debug('render')
     let content = this.getQuestion()
     let lines: string[] = []
     let bottomLines: string[] = []
     const h = () => this.screen.render(content, lines.join('\n'))
 
-    if (!this.ui.isLoading) renderSpinner(this.spinner, this.ui.isLoading)
-    if (!this.ui.isLoadingOnce && this.ui.isLoading) {
-      // bottomContent += '  ' + pc.dim(this.opt.loadingText || 'Loading...')
-      renderSpinner(this.spinner, this.ui.isLoading, content)
-      this.ui.isLoadingOnce = true
+    if (error) {
+      lines = [`${pc.red('>> ')}${error}`]
       return h()
     }
 
+    // Tab
     if (this.tabChoiceList?.length) lines.push(renderTab(this.tabChoiceList, this.ui.currentTabIndex))
+    // Table
     if (this?.data?.length) {
       const { head, body } = renderTable(this.data, this.ui.selectedIndex)
       lines.push(pc.bgWhite(pc.bold(head[0])))
 
-      if (this.ui.isLoading) renderSpinner(this.spinner, this.ui.isLoading)
+      if (this.ui.isLoading) lines.push('  ' + pc.dim(this.opt.loadingText || 'Loading...'))
       else {
         lines.push(this.paginator.paginate(body, this.ui.selectedIndex, this.pageSize))
         bottomLines.push(this.renderIndicator())
@@ -247,19 +270,12 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     bottomLines.push('  ' + this.renderHelpText())
     lines.push(...bottomLines)
 
-    if (error) {
-      lines = [`${pc.red('>> ')}${error}`]
-      h()
-    }
-
     h()
-    this.ui.isFirstRender = false
   }
 
   renderIndicator() {
     let res = '\n  ' + pc.dim(`Select ${this.ui.selectedIndex + 1}/${this.data.length} `)
-    if (this.ui.pagination)
-      res += ' · ' + pc.dim(`Page ${this.ui.pagination.currentPage}/${this.ui.pagination.totalPages}`)
+    if (this.pagination) res += ' · ' + pc.dim(`Page ${this.pagination.currentPage}/${this.pagination.totalPages}`)
     return res
   }
 
@@ -271,7 +287,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     let keyMap = []
     if (isToggledHelp) {
       keyMap.push({ key: `↑/↓`, desc: 'scroll' })
-      if (this.ui.pagination) keyMap.push({ key: `←/→`, desc: 'turn pages' })
+      if (this.pagination) keyMap.push({ key: `←/→`, desc: 'turn pages' })
       if (this.opt.sourcePrompts) keyMap.push({ key: `/`, desc: '/' })
       if (this.opt.tab) keyMap.push({ key: `tab`, desc: 'switch tabs' })
     }
@@ -297,7 +313,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   }
 }
 
-const renderTab = (tabs: TabChoiceList, activeIndex: number) => {
+const renderTab = memoizeOne((tabs: TabChoiceList, activeIndex: number) => {
   const seperator = ' | '
   const res = tabs!
     .map((choice, index) => {
@@ -307,9 +323,9 @@ const renderTab = (tabs: TabChoiceList, activeIndex: number) => {
     })
     .join(seperator)
   return ' ' + res
-}
+})
 
-const renderTable = (rowCollections: Row[], pointer: number) => {
+const renderTable = memoizeOne((rowCollections: Row[], pointer: number) => {
   const text = Table.print(
     rowCollections,
     (item, cell) => {
@@ -337,27 +353,14 @@ const renderTable = (rowCollections: Row[], pointer: number) => {
   }
 
   return res
-}
+})
 
-const renderLine = (strokeSize: number) => {
+const renderLine = memoizeOne((strokeSize: number) => {
   return `${'┈'.repeat(strokeSize)}`
-}
-
-const renderSpinner = (spinner: Ora, isLoading: boolean, currentText?: string) => {
-  if (isLoading) {
-    currentText ? spinner.start(currentText) : spinner.start()
-    // process.stderr.moveCursor(0, -1)
-    // process.stderr.clearLine(1)
-  } else {
-    // const frame = spinner.frame()
-    spinner.stop()
-    spinner.clear()
-    // process.stderr.write(frame)
-  }
-}
+})
 
 const isRowSelectable = (row: Row) => {
-  return !row.disabled
+  return row && !row.disabled
 }
 
 const askForApplyFilters = async () => {
