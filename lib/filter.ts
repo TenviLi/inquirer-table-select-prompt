@@ -54,8 +54,6 @@ export class FilterPage {
   protected shownList: TreeNode[] = []
 
   protected subscriptions!: Subscription[]
-  // TODO: 如果root节点open了：选中过的子节点的整个path上的所有父节点都open
-  // TODO: 给定初始默认值，映射到 selectedList
 
   constructor(
     public rl: ReadLineInterface,
@@ -100,9 +98,6 @@ export class FilterPage {
           rootNode._selectedNode = []
         })
       this.render()
-    } else if (keyName === 'escape') {
-      // TODO: 已经有预设值的情况下怎么办
-      this.done()
     }
   }
 
@@ -169,7 +164,6 @@ export class FilterPage {
     subscriptions?.forEach((sub) => sub.unsubscribe())
   }
 
-  // TODO: 数据结构从flatten数组解析为chained对象
   onSubmit(_line?: string) {
     // return this.selectedList.map((item) => valueFor(item))
     // return this.selectedList.reduce((res, node) => {
@@ -205,7 +199,6 @@ export class FilterPage {
     this.screen.render(message, '')
   }
 
-  // TODO: 子节点选中后，其他兄弟子节点置灰处理（？）
   createTreeContent(node: TreeNode = this.tree, indent = 0) {
     const children: TreeNode[] = node.children || []
     let output = ''

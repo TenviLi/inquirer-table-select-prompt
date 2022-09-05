@@ -79,7 +79,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     if (!source && ['tree', 'loadingText'].some((v) => v in this.opt)) this.throwParamError('source')
 
     if (tab) this.initTab()
-    if (filtersDefault) merge(this.context, filtersDefault)
+    if (filtersDefault) merge(this.context, { filters: filtersDefault })
   }
 
   initTab(tab = this.opt.tab) {
@@ -263,7 +263,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   // TODO: 缓存每一个 Tab 的 Pagination（目前暂时先直接清空 Pagination）
   onTabKey() {
     if (this.tabChoiceList?.length) {
-      this.context.pagination = undefined
+      this.context.pagination = {}
       const nextIndex = (this.ui.currentTabIndex + 1) % this.tabChoiceList!.length
       const payload = merge({}, this.context, { filters: { [this.tabChoiceKey!]: this.getTabValue(nextIndex) } })
       this.createSpinner(async () => {
