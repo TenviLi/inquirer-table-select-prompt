@@ -55,7 +55,7 @@ export function generateHelpText(keyMap: Shortcut[], isToggledHelp: boolean) {
   }
   map.push(...stickyKeyMap)
 
-  const lines = map.map(({ key, desc }) => `${pc.gray(key)} ${pc.dim(pc.gray(desc))}`)
+  const lines = map.map(({ key, desc }) => `${pc.gray(key)} ${pc.gray(pc.dim(desc))}`)
   // return chunk(lines, 3).map((arr) => arr.join(SEPERATOR_CHAR)).join('\n')
   return lines.join(SEPERATOR_CHAR)
 }

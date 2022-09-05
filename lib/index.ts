@@ -23,7 +23,6 @@ import inquirer = require('inquirer')
 import assert = require('assert')
 import cliCursor = require('cli-cursor')
 const debug = Debug('inquirer-table-select:index')
-import type ScreenManager = require('inquirer/lib/utils/screen-manager')
 import merge = require('lodash.merge')
 
 // TODO: inquirer 的各种方法 支持 async，支持各种字段比如 filter transformer 等
@@ -53,6 +52,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   protected requestOpts: Record<string, unknown> = {}
   protected router: Router = Router.NORMAL
   protected filterPage?: FilterPage
+  protected events!: ReturnType<typeof observe>
 
   get currentTabValue() {
     //@ts-ignore
@@ -65,21 +65,12 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
   constructor(question: inquirer.Question<inquirer.Answers>, rl: ReadLineInterface, answers: inquirer.Answers) {
     super(question, rl, answers)
-    const { data, source, tree, tab } = this.opt
+    const { data, source, tab } = this.opt
 
     this.opt.default = null // 禁用默认渲染行为
 
     assert.ok(data || source, 'Your muse provide `data` or `source` parameter')
     if (!source && ['tree', 'loadingText'].some((v) => v in this.opt)) this.throwParamError('source')
-
-    if (tree) {
-      this.filterPage = new FilterPage(this.rl, this.screen, {
-        tree,
-        message: `${this.getQuestion()}
-  Filters:
-`,
-      })
-    }
 
     if (tab) {
       const { children, key } = tab
@@ -101,7 +92,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     const [observedObject, observedObjectChange$] = observeObject(this._ui)
     this.ui = observedObject
 
-    await createSpinner(this.screen, this.getQuestion().replace(`${pc.green('?')} `, ''), async () => {
+    await this.createSpinner(async () => {
       await this.fetchData()
     })
 
@@ -114,18 +105,19 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     })
 
     const events = observe(this.rl)
-    // const dontHaveAnswer = () => this.answer === undefined
-    events.line
-      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined && this._ui.isLoading !== false))
-      .forEach(this.onSubmit.bind(this))
-    events.keypress
-      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined && this._ui.isLoading !== false))
-      .forEach(this.onKeypress.bind(this))
-    events.keypress
-      .pipe(takeWhile(() => this.router === Router.FILTER && !this.filterPage))
-      .forEach(this.filterPage!.onKeypress.bind(this.filterPage!))
+    this.events = events
+    this._subscribe(events)
 
     return this
+  }
+
+  _subscribe(events: ReturnType<typeof observe>) {
+    events.line
+      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined && this._ui.isLoading === true))
+      .forEach(this.onSubmit.bind(this))
+    events.keypress
+      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined && this._ui.isLoading === true))
+      .forEach(this.onKeypress.bind(this))
   }
 
   onKeypress(event: KeypressEvent) {
@@ -155,13 +147,30 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     } else if (this.pagination?.hasNextPage && this.opt.next && keyName === 'right') {
       this.opt.next?.(this.requestOpts)
       this.fetchData()
-    } else if (this.opt.tree && event.key.sequence === '/' && keyName === 'f') {
+    } else if (this.opt.tree && (event.key.sequence === '/' || keyName === 'f')) {
       this.router = Router.FILTER
-      this.filterPage?._run((options: any) => {
-        this.filterPage = undefined
-        merge(this.requestOpts, options)
-        this.router = Router.NORMAL
-        this.renderNormal()
+      this.filterPage = new FilterPage(this.rl, this.screen, {
+        tree: this.opt.tree,
+        message: `${this.getQuestion()}
+  Filters:
+`,
+      })
+
+      this.createSpinner(async () => {
+        await this.filterPage?._run((options: any) => {
+          this.router = Router.NORMAL
+          this.filterPage = undefined
+          merge(this.requestOpts, options)
+          this.renderNormal()
+          this._subscribe(this.events)
+        })
+      }).then(() => {
+        this.events.keypress
+          .pipe(takeWhile(() => this.router === Router.FILTER && this.filterPage !== undefined))
+          .forEach(this.filterPage!.onKeypress.bind(this.filterPage!))
+        this.events.line
+          .pipe(takeWhile(() => this.router === Router.FILTER && this.filterPage !== undefined))
+          .forEach(this.filterPage!.onSubmit.bind(this.filterPage!))
       })
     } else if (this.opt.tab && keyName === 'tab') {
       if (this.tabChoiceList) {
@@ -182,8 +191,8 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     this.done(this.currentRow.value ?? this.currentRow.row)
   }
 
-  async onTabSwitched() {
-    this.ui.currentTabIndex = this.ui.currentTabIndex++ % this.tabChoiceList!.length
+  onTabSwitched() {
+    this.ui.currentTabIndex = (this.ui.currentTabIndex + 1) % this.tabChoiceList!.length
   }
 
   async fetchData(payload = this.requestOpts) {
@@ -191,13 +200,10 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       debug('renderData::source')
       this.ui.selectedIndex = 0
       this.ui.isLoading = true
-      // await createSpinner(
-      //   this.screen,
-      //   this.getQuestion().replace(`${pc.green('?')} `, ''),
+      // await this.createSpinner(
       //   async () => {
       await this.request(payload)
-      //   },
-      //   this.opt.loadingText
+      //   }
       // )
       const selectedIndex = this.data.findIndex((v: any) => v.value === this.opt?.default)
       this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
@@ -302,22 +308,48 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       { key: `↑/↓`, desc: 'scroll' },
     ]
     if (this.pagination) keyMap.push({ key: `←/→`, desc: 'turn pages' })
-    if (this.opt.tree) keyMap.push({ key: `/`, desc: '/' })
+    if (this.opt.tree) keyMap.push({ key: `/`, desc: 'filters' })
     if (this.opt.tab) keyMap.push({ key: `tab`, desc: 'switch tabs' })
     return generateHelpText(keyMap, isToggledHelp)
+  }
+
+  createSpinner = async (func: () => Promise<void>) => {
+    const screen = this.screen
+    const message = this.getQuestion().replace(`${pc.green('?')} `, '')
+    const loadingText = this.opt.loadingText || 'Loading...'
+
+    let spinnerIndex = 0
+    const spinner = setInterval(() => {
+      spinnerIndex++
+
+      if (spinnerIndex >= dots.frames.length) {
+        spinnerIndex = 0
+      }
+
+      const spinnerFrame = dots.frames[spinnerIndex]
+      screen.render(
+        `${pc.blue(spinnerFrame)} ${message}
+  ${pc.dim(loadingText)}`,
+        ''
+      )
+    }, dots.interval)
+
+    await func()
+    clearInterval(spinner)
+    return spinner
   }
 }
 
 const renderTab = memoizeOne((tabs: TreeNode[], activeIndex: number) => {
-  const seperator = ' | '
+  const seperator = '|'
   const res = tabs!
     .map((choice, index) => {
       //@ts-ignore
-      const tabName: string = choice.short || choice.name || 'Unknown Tab'
-      return activeIndex === index ? pc.bgCyan(pc.white(tabName)) : tabName
+      const tabName: string = choice.short || choice.name || choice.value
+      return activeIndex === index ? pc.bgCyan(` ${tabName} `) : ` ${tabName} `
     })
     .join(seperator)
-  return ' ' + res
+  return `  ${pc.dim('Tab:')} ${res}`
 })
 
 const renderTable = memoizeOne((rowCollections: Row[], pointer: number) => {
@@ -366,31 +398,4 @@ const validateData = (collection: Row[]) => {
     'Every data item must have a `row` property'
   )
   return collection
-}
-
-const createSpinner = async (
-  screen: ScreenManager,
-  message: string,
-  func: () => Promise<void>,
-  loadingText?: string
-) => {
-  let spinnerIndex = 0
-  const spinner = setInterval(() => {
-    spinnerIndex++
-
-    if (spinnerIndex >= dots.frames.length) {
-      spinnerIndex = 0
-    }
-
-    const spinnerFrame = dots.frames[spinnerIndex]
-    screen.render(
-      `${pc.blue(spinnerFrame)} ${message}
-  ${pc.dim(loadingText || 'Loading...')}`,
-      ''
-    )
-  }, dots.interval)
-
-  await func()
-  clearInterval(spinner)
-  return spinner
 }

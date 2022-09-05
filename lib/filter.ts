@@ -63,32 +63,21 @@ export class FilterPage {
 
     if (keyName === 'h' || event.key.sequence === '?' || event.key.sequence === '？') {
       this.isToggledHelp = !this.isToggledHelp
+      this.render()
     } else if (keyName === 'down' || (keyName === 'n' && event.key.ctrl)) {
       this.moveActive(1)
     } else if (keyName === 'up' || (keyName === 'p' && event.key.ctrl)) {
       this.moveActive(-1)
     } else if (keyName === 'left') {
-      if (this.active.children && this.active.open) {
-        this.active.open = false
-      } else {
-        if (this.active._parent !== this.tree) {
-          this.active = this.active._parent!
-        }
-      }
-
-      this.render()
+      this.onLeftKey()
     } else if (keyName === 'right') {
-      if (this.active.children) {
-        if (!this.active.open) {
-          this.active.open = true
-
-          prepareChildren(this.active).then(() => this.render())
-        } else if (this.active.children.length) {
-          this.moveActive(1)
-        }
-      }
+      this.onRightKey()
     } else if (keyName === 'tab') {
-      this.toggleOpen()
+      if (this.active.open) {
+        this.onLeftKey()
+      } else {
+        this.onRightKey()
+      }
     } else if (keyName === 'space') {
       this.toggleSelection()
     } else if (keyName === 'backspace') {
@@ -98,10 +87,32 @@ export class FilterPage {
           rootNode._selectedNode = []
         })
       this.render()
-    } else if (keyName === 'return') {
-      this.onSubmit()
     } else if (keyName === 'escape') {
+      // TODO: 已经有预设值的情况下怎么办
       this.done({})
+    }
+  }
+
+  onLeftKey() {
+    if (this.active.children && this.active.open) {
+      this.active.open = false
+    } else {
+      if (this.active._parent !== this.tree) {
+        this.active = this.active._parent!
+      }
+    }
+
+    this.render()
+  }
+  onRightKey() {
+    if (this.active.children) {
+      if (!this.active.open) {
+        this.active.open = true
+
+        prepareChildren(this.active).then(() => this.render())
+      } else if (this.active.children.length) {
+        this.moveActive(1)
+      }
     }
   }
 
@@ -115,12 +126,10 @@ export class FilterPage {
     assert.ok(tree.children, 'property `tree` not found children')
 
     for (const node of tree.children as Normalized) {
+      node._isRoot = true
+      node._selectedNode = []
+      // node._prepared = true
       await prepareChildren(node)
-      ;(tree.children as Normalized)?.forEach((firstLayerNode) => ({
-        ...firstLayerNode,
-        _isRoot: true,
-        _selectedNode: [],
-      }))
     }
 
     this.tree = tree as TreeNode<Normalized>
@@ -128,7 +137,7 @@ export class FilterPage {
   }
 
   // TODO: 数据结构从flatten数组解析为chained对象
-  onSubmit() {
+  onSubmit(_line?: string) {
     // return this.selectedList.map((item) => valueFor(item))
     // return this.selectedList.reduce((res, node) => {
     //   let currNode: TreeNode = node
@@ -153,9 +162,9 @@ export class FilterPage {
 
     this.shownList = []
     let treeContent = this.createTreeContent()
-    if (this.opt.loop !== false) {
-      treeContent += '----------------'
-    }
+    // if (this.opt.loop !== false) {
+    //   treeContent += '----------------'
+    // }
     message += '\n' + this.paginator.paginate(treeContent, this.shownList.indexOf(this.active), this.opt.pageSize!)
 
     let bottomContent = ''
@@ -168,7 +177,6 @@ export class FilterPage {
   createTreeContent(node: TreeNode = this.tree, indent = 2) {
     const children: TreeNode[] = node.children || []
     let output = ''
-
     children.forEach((child) => {
       this.shownList.push(child)
       if (!this.active) this.active = child
@@ -368,8 +376,8 @@ const valueFor = (node: TreeNode) => {
 
 const recursiveFindRootNode = (node: TreeNode) => {
   let side = node
-  while (!side._isRoot) {
-    side = node._parent!
+  while (side && !side._isRoot) {
+    side = side._parent!
   }
   return side
 }
@@ -380,9 +388,9 @@ const recursiveKeyify = (nodes: TreeNode[]) => {
     let val = valueFor(node)
     let side = node
     do {
-      side = node._parent!
+      side = side._parent!
       val = { [side.key!]: val }
-    } while (!side._isRoot)
+    } while (side && !side._isRoot)
     merge(res, val)
   }
   return res
