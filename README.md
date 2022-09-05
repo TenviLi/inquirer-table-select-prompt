@@ -18,6 +18,8 @@
 
 ## 安装
 
+安装本插件前，请确保项目已安装 inquirer.
+
 ```bash
 $ npm i inquirer-table-select-prompt
 ```
