@@ -5,7 +5,6 @@ import Debug from 'debug'
 import Table from 'easy-table'
 import figures from 'figures'
 import isPlainObject from 'lodash.isplainobject'
-import merge from 'lodash.merge'
 import memoizeOne from 'memoize-one'
 import type { Interface as ReadLineInterface } from 'readline'
 import type { Observable, Subscription } from 'rxjs'
@@ -13,7 +12,7 @@ import { filter, takeWhile } from 'rxjs/operators'
 import terminalSize from 'term-size'
 import type { TreeNode } from './filter'
 import { FilterPage } from './filter'
-import type { KeypressEvent, PropsState, ResponsePagination, Row, SourceType, TableSelectConfig } from './types'
+import type { KeypressEvent, PropsState, Row, TableSelectConfig, TableSelectContext } from './types'
 import { Router, Status } from './types'
 import { generateHelpText, SEPERATOR_CHAR, Shortcut } from './utils/common'
 import { observeObject } from './utils/observe'
@@ -27,6 +26,7 @@ import assert = require('assert')
 import cliCursor = require('cli-cursor')
 const debug = Debug('inquirer-table-select:index')
 
+// TODO: 性能优化
 // TODO: inquirer 的各种方法 支持 async，支持各种字段比如 filter transformer 等
 export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Question> {
   protected pageSize: number = this.opt.pageSize || 15
@@ -44,28 +44,25 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     currentTabIndex: 0,
   }
   protected ui!: PropsState
-  protected pagination?: ResponsePagination
   public status = Status.Pending
   protected answer: any
   protected done!: (value: any) => void
 
-  protected data: Row[] = []
-
   protected isFiltersFirstRender: boolean = false
-  protected requestContext: Record<string, unknown> = {}
+  protected context: TableSelectContext = { filters: {}, data: [] }
+
   protected router: Router = Router.NORMAL
-  // protected filterPage: FilterPage | null = null
   protected events!: ReturnType<typeof observe>
   protected observedObjectChange$!: Observable<PropsState>
   protected subscriptions!: Subscription[]
 
   get currentTabValue() {
     //@ts-ignore
-    return this.tabChoiceList![this.ui.currentTabIndex].value
+    return this.tabChoiceList![this.ui.currentTabIndex]
   }
 
   get currentRow() {
-    return this.data[this.ui.selectedIndex]
+    return this.context.data![this.ui.selectedIndex]
   }
 
   constructor(question: inquirer.Question<inquirer.Answers>, rl: ReadLineInterface, answers: inquirer.Answers) {
@@ -74,14 +71,31 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
     this.opt.default = null // 禁用默认渲染行为
 
-    assert.ok(data || source, 'Your muse provide `data` or `source` parameter')
+    assert.ok(data || source, new Error('Your muse provide `data` or `source` parameter'))
     if (!source && ['tree', 'loadingText'].some((v) => v in this.opt)) this.throwParamError('source')
 
-    if (tab) {
-      const { children, key } = tab
-      this.tabChoiceKey = key
-      this.tabChoiceList = children
+    if (tab) this.initTab()
+  }
+
+  initTab(tab = this.opt.tab) {
+    const { children, key } = tab!
+    this.tabChoiceKey = key
+    assert.ok(
+      Array.isArray(children) && children.every((i) => typeof i === 'object'),
+      new Error('Property `tab.children` cannot contain object items')
+    )
+    this.tabChoiceList = children
+
+    if (tab!.default) {
+      const currentTabIndex = children.indexOf(tab!.default)
+      assert.ok(
+        currentTabIndex !== -1,
+        'Property `tab.children` must contain the value you set in property `tab.default`'
+      )
+      this._ui.currentTabIndex = currentTabIndex
     }
+
+    this.context.filters![key] = this.tabChoiceList![this._ui.currentTabIndex]
   }
 
   async _run(cb: (value: any) => void) {
@@ -132,75 +146,109 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   }
 
   onKeypress(event: KeypressEvent) {
-    const keyName = (event.key && event.key.name) || undefined
+    const keyName = event?.key?.name || undefined
 
     if (event.key.name === 'q') process.exit(0)
 
     // if (this.ui.isToggledHelp) return
     if (keyName === 'h' || event.key.sequence === '?' || event.key.sequence === '？') {
-      this.ui.isToggledHelp = !this.ui.isToggledHelp
+      this.onHelpKey()
     } else if (keyName === 'down' || (keyName === 'n' && event.key.ctrl)) {
-      let index = this.ui.selectedIndex
-      do {
-        index = index < this.data.length - 1 ? index + 1 : 0
-      } while (!isRowSelectable(this.data[index]))
-      this.ui.selectedIndex = index
-      utils.up(this.rl, 2)
+      this.onDownKey()
     } else if (keyName === 'up' || (keyName === 'p' && event.key.ctrl)) {
-      let index = this.ui.selectedIndex
-      do {
-        index = index > 0 ? index - 1 : this.data.length - 1
-      } while (!isRowSelectable(this.data[index]))
-      this.ui.selectedIndex = index
-    } else if (this.pagination?.hasPreviousPage && this.opt.prev && keyName === 'left') {
-      const pagination = this.opt.prev?.(this.pagination) || {}
-      this.request({ ...this.requestContext, pagination }).then(() => {
-        merge(this.requestContext, { pagination })
-        this.renderNormal()
-      })
-    } else if (this.pagination?.hasNextPage && this.opt.next && keyName === 'right') {
-      const pagination = this.opt.next?.(this.pagination) || {}
-      this.request({ ...this.requestContext, pagination }).then(() => {
-        merge(this.requestContext, { pagination })
-        this.renderNormal()
-      })
-    } else if (this.opt.tree && (event.key.sequence === '/' || keyName === 'f')) {
-      this.router = Router.FILTER
-      this.unsubscribe()
-
-      this.createSpinner(async () => {
-        const filterPage = new FilterPage(this.rl, this.screen, this.events, {
-          tree: this.opt.tree!,
-          message: `${this.getQuestion()}
-  ${pc.gray('Filters:')}
-`,
-          treeDefault: this.isFiltersFirstRender ? this.requestContext : this.opt.treeDefault,
-        })
-        filterPage.subscribe()
-
-        await filterPage!._run(async (options: Object = {}) => {
-          this.router = Router.NORMAL
-          filterPage!.unsubscribe()
-          await this.createSpinner(async () => {
-            await this.request({ ...this.requestContext, ...options })
-            merge(this.requestContext, options)
-
-            this.renderNormal()
-            this.subscribe()
-          })
-        })
-      })
-    } else if (this.opt.tab && keyName === 'tab') {
-      if (this.tabChoiceList) {
-        const payload = { ...this.requestContext, [this.tabChoiceKey!]: this.currentTabValue }
-        this.request(payload).then(() => {
-          this.onTabSwitched()
-          merge(this.requestContext, { [this.tabChoiceKey!]: this.currentTabValue })
-        })
-      }
+      this.onUpKey()
+    } else if (keyName === 'left') {
+      if (this.context.pagination?.hasPreviousPage && this.opt.prev) this.onLeftKey()
+    } else if (keyName === 'right') {
+      if (this.context.pagination?.hasNextPage && this.opt.next) this.onRightKey()
+    } else if (event.key.sequence === '/' || keyName === 'f') {
+      if (this.opt.tree) this.onSlashKey()
+    } else if (keyName === 'tab') {
+      if (this.opt.tab) this.onTabKey()
     }
   }
+  onHelpKey() {
+    this.ui.isToggledHelp = !this.ui.isToggledHelp
+  }
+  onDownKey() {
+    let index = this.ui.selectedIndex
+    do {
+      index = index < this.context.data!.length - 1 ? index + 1 : 0
+    } while (!isRowSelectable(this.context.data![index]))
+    this.ui.selectedIndex = index
+    utils.up(this.rl, 2)
+  }
+  onUpKey() {
+    let index = this.ui.selectedIndex
+    do {
+      index = index > 0 ? index - 1 : this.context.data!.length - 1
+    } while (!isRowSelectable(this.context.data![index]))
+    this.ui.selectedIndex = index
+  }
+  onLeftKey() {
+    const patch = this.opt.prev?.(this.context.pagination!, this.context) || {}
 
+    const payload = { ...this.context, ...patch }
+    this.request(payload).then(() => {
+      this.context = payload
+      this.renderNormal()
+    })
+  }
+  onRightKey() {
+    const patch = this.opt.next?.(this.context.pagination!, this.context) || {}
+
+    const payload = { ...this.context, ...patch }
+    this.request(payload).then(() => {
+      this.context = payload
+      this.renderNormal()
+    })
+  }
+  onSlashKey() {
+    this.router = Router.FILTER
+    this.unsubscribe()
+
+    this.createSpinner(async () => {
+      const filterPage = new FilterPage(this.rl, this.screen, this.events, {
+        tree: this.opt.tree!,
+        message: `${this.getQuestion()}
+  ${pc.gray('Filters:')}
+`,
+        treeDefault: this.isFiltersFirstRender ? this.context.filters : this.opt.treeDefault,
+      })
+      filterPage.subscribe()
+
+      await filterPage!._run(async (options: any) => {
+        this.router = Router.NORMAL
+        filterPage!.unsubscribe()
+
+        if (typeof options === 'object') {
+          await this.createSpinner(async () => {
+            const payload = { ...this.context, filters: options }
+            await this.request(payload)
+            this.context = payload
+            if (this.opt.tab && this.opt.tree?.some((node) => node.key === this.tabChoiceKey!)) this.updateTabState()
+            // this.renderNormal()
+            // this.subscribe()
+          })
+        }
+
+        this.renderNormal()
+        this.subscribe()
+      })
+
+      this.isFiltersFirstRender = true
+    })
+  }
+  onTabKey() {
+    if (this.tabChoiceList) {
+      const payload = { ...this.context, [this.tabChoiceKey!]: this.currentTabValue }
+      this.request(payload).then(() => {
+        this.ui.currentTabIndex = (this.ui.currentTabIndex + 1) % this.tabChoiceList!.length
+
+        this.context = payload
+      })
+    }
+  }
   onSubmit(_line?: string) {
     this.status = Status.Done
     this.answer = (this.currentRow.short || this.currentRow.name || this.currentRow.value) ?? this.currentRow.row
@@ -212,11 +260,14 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     this.done(this.currentRow.value ?? this.currentRow.row)
   }
 
-  onTabSwitched() {
-    this.ui.currentTabIndex = (this.ui.currentTabIndex + 1) % this.tabChoiceList!.length
+  updateTabState() {
+    const newTabValue: any = this.context.filters![this.tabChoiceKey!]
+
+    const newTabIndex = this.tabChoiceList!.indexOf(newTabValue)
+    if (newTabIndex !== -1) this._ui.currentTabIndex = newTabIndex
   }
 
-  async fetchData(payload = this.requestContext) {
+  async fetchData(payload = this.context || {}) {
     if (this.opt.source) {
       debug('renderData::source')
       this.ui.selectedIndex = 0
@@ -226,38 +277,39 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       await this.request(payload)
       //   }
       // )
-      const selectedIndex = this.data.findIndex((v: any) => v.value === this.opt?.default)
+      const selectedIndex = this.context.data!.findIndex((v: any) => v.value === this.opt?.default)
       this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
       this.ui.isLoading = false
     } else if (this.opt.data) {
       debug('fetchData start')
       this.ui.isLoading = true
-      this.data = validateData(this.opt.data)
-      const selectedIndex = this.data.findIndex((row) => row.value === this.opt?.default)
+      this.context.data = validateData(this.opt.data)
+      const selectedIndex = this.context.data.findIndex((row) => row.value === this.opt?.default)
       this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
       this.ui.isLoading = false
       debug('fetchData end')
     }
   }
 
-  async request(requestOpts = this.requestContext || {}) {
-    let thisPromise: Promise<SourceType>
+  async request(requestOpts = this.context || {}) {
+    let thisPromise: Promise<TableSelectContext>
     try {
-      const result = this.opt.source!(this.answers, { requestOpts })
+      const result = this.opt.source!(this.answers, requestOpts)
       thisPromise = Promise.resolve(result)
     } catch (error) {
       thisPromise = Promise.reject(error)
     }
 
     const lastPromise = thisPromise
-    const res = await thisPromise
-    assert.ok(isPlainObject(res), new Error('`Source` method need to return a plain object'))
-    const { data, pagination: newPagination } = res
-    assert.ok(Array.isArray(data), new Error(`\`Source\` method need to return ${pc.green('{ data: Row[] }')}`))
+    const patch = await thisPromise
+    assert.ok(isPlainObject(patch), new Error('`Source` method must return a plain object'))
+    const { data, pagination: newPagination, ...rest } = patch
+    assert.ok(Array.isArray(data), new Error(`\`Source\` method must return ${pc.green('{ data: Row[] }')}`))
     if (thisPromise !== lastPromise) return
 
-    this.data = validateData(data)
-    if (newPagination) this.pagination = newPagination
+    this.context.data = validateData(data)
+    if (newPagination) this.context.pagination = newPagination
+    this.context = { ...this.context, ...rest }
   }
 
   renderNormal(error?: string) {
@@ -274,8 +326,8 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     // Tab
     if (this.tabChoiceList?.length) lines.push(renderTab(this.tabChoiceList, this.ui.currentTabIndex))
     // Table
-    if (this?.data?.length) {
-      const { head, body } = renderTable(this.data, this.ui.selectedIndex)
+    if (this.context.data?.length) {
+      const { head, body } = renderTable(this.context.data!, this.ui.selectedIndex)
       lines.push(pc.bgWhite(pc.bold(head[0])))
       const len = head[1].length
 
@@ -297,12 +349,12 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   }
 
   renderIndicator(limitSize: number) {
-    let left = '  ' + `Select ${this.ui.selectedIndex + 1}/${this.data.length}`
+    let left = '  ' + `Select ${this.ui.selectedIndex + 1}/${this.context.data!.length}`
     let right = ''
-    if (this.pagination) {
-      const { currentPage, totalPages, hasNextPage, hasPreviousPage } = this.pagination
+    if (this.context.pagination) {
+      const { currentPage, totalPages, hasNextPage, hasPreviousPage } = this.context.pagination
       if (typeof currentPage === 'number' && typeof totalPages === 'number')
-        left += SEPERATOR_CHAR + `Page ${this.pagination.currentPage}/${this.pagination.totalPages}`
+        left += SEPERATOR_CHAR + `Page ${this.context.pagination.currentPage}/${this.context.pagination.totalPages}`
 
       const rightChunk = []
       hasPreviousPage && rightChunk.push(`← prev`)
@@ -329,7 +381,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       // { key: `↕`, desc: 'scroll' },
     ]
     const keyMap: Shortcut[] = []
-    if (this.pagination) keyMap.push({ key: `↔`, desc: 'turn pages' })
+    if (this.context.pagination) keyMap.push({ key: `↔`, desc: 'turn pages' })
     if (this.opt.tree) keyMap.push({ key: `/`, desc: 'filters' })
     if (this.opt.tab) keyMap.push({ key: `tab`, desc: 'switch tabs' })
     return generateHelpText({ keyMap, isToggledHelp, hideKeyMap, width: terminalSize().columns })

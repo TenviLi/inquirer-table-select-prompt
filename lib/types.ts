@@ -17,20 +17,23 @@ export interface ResponsePagination extends Record<string, unknown> {
   hasNextPage?: boolean
 }
 
-export type SourceType<T = Row[]> = { data: T; pagination?: ResponsePagination }
+export interface TableSelectContext<T = Row[]> {
+  data?: T
+  pagination?: ResponsePagination
+  filters?: Record<string, unknown>
+}
+
+type AsPromise<T> = Promise<T> | T
 
 export interface TableSelectConfig<T extends Row = Row> {
   data?: T[]
 
-  default?: T['value']
+  // dataDefault?: T['value']
 
-  source?: (
-    answers: inquirer.Answers,
-    context?: Record<string, unknown>
-  ) => Promise<SourceType<Row[]>> | SourceType<Row[]>
+  source?: (answers: inquirer.Answers, context?: TableSelectContext) => AsPromise<TableSelectContext>
   tree?: TreeNode[]
   treeDefault?: Object
-  tab?: TreeNode
+  tab?: TreeNode & { key: string; default?: any; children: Array<string | number | boolean> }
 
   loadingText?: string
   emptyText?: string
@@ -38,9 +41,10 @@ export interface TableSelectConfig<T extends Row = Row> {
   loop?: boolean
   pageSize?: number
 
-  prev?: (prevPagination: ResponsePagination) => ResponsePagination | null | undefined
-  next?: (prevPagination: ResponsePagination) => ResponsePagination | null | undefined
-  cache?: boolean
+  prev?: (lastPagination: ResponsePagination, context?: TableSelectContext) => TableSelectContext | null | undefined
+  next?: (lastPagination: ResponsePagination, context?: TableSelectContext) => TableSelectContext | null | undefined
+
+  // pagination?: ResponsePagination
 }
 
 export enum Status {

@@ -102,7 +102,7 @@ export class FilterPage {
       this.render()
     } else if (keyName === 'escape') {
       // TODO: 已经有预设值的情况下怎么办
-      this.done({})
+      this.done()
     }
   }
 
@@ -136,7 +136,7 @@ export class FilterPage {
       children: typeof this.opt.tree === 'function' ? this.opt.tree : cloneDeep(this.opt.tree),
     }
     await runChildrenFunctionIfRequired(tree)
-    assert.ok(tree.children, 'property `tree` not found children')
+    assert.ok(tree.children, new Error('Property `tree` not found children'))
 
     for (const node of tree.children as Normalized) {
       node._isRoot = true
@@ -145,11 +145,11 @@ export class FilterPage {
       await prepareChildren(node)
     }
 
-    this.tree = tree as TreeNode<Normalized>
     if (this.opt.treeDefault) {
-      await this.initSelections(this.tree as TreeNode<Normalized>)
+      await this.initSelections(tree as TreeNode<Normalized>)
     }
 
+    this.tree = tree as TreeNode<Normalized>
     this.render()
   }
 
@@ -335,12 +335,12 @@ export class FilterPage {
   }
 
   async initSelections(node: TreeNode<Normalized> = this.tree, def = this.opt.treeDefault, _defPath: string = '') {
-    await runChildrenFunctionIfRequired(node)
     const processedChildren =
       node?.children?.reduce((prev, child) => {
         prev[child.key!] = child
         return prev
       }, {} as Record<string, TreeNode>) || {}
+    // console.log(require('util').inspect(processedChildren))
 
     for (const key in def) {
       const defPath = _defPath + (_defPath ? `.${key}` : key)
@@ -349,24 +349,33 @@ export class FilterPage {
         if (typeof def[key] === 'object') {
           if (Array.isArray(processedChildren[key]?.children)) {
             processedChildren[key].open = true
+            await prepareChildren(processedChildren[key])
             await this.initSelections(processedChildren[key], def[key], defPath)
           } else {
-            throw new Error(`property \`tree\` key \`${defPath}\` not found children nodes`)
+            throw new Error(`Property \`tree\` key \`${defPath}\` not found children nodes`)
           }
         } else {
-          if (processedChildren[key]?.children!.filter((child) => valueFor(child) == def[key])) {
-            const rootNode = recursiveFindRootNode(processedChildren[key])
-            if (processedChildren[key]) rootNode._selectedNode!.push(processedChildren[key])
+          processedChildren[key].open = true
+          await prepareChildren(processedChildren[key])
+          if (Array.isArray(processedChildren[key]?.children)) {
+            const selectedChild = processedChildren[key].children!.find((child) => valueFor(child) == def[key])
+            if (selectedChild) {
+              const rootNode = recursiveFindRootNode(processedChildren[key])
+              if (processedChildren[key]) rootNode._selectedNode!.push(selectedChild)
+            } else {
+              throw new Error(
+                `Property \`tree\` key \`${defPath}\` children not found value ${pc.green(
+                  def[key]
+                )}, ${require('util').inspect(processedChildren[key].children)}`
+              )
+            }
           } else {
-            throw new Error(
-              `property \`tree\` key \`${defPath}\` value must equal to ${pc.green(def[key])}, not ${pc.red(
-                valueFor(processedChildren[key]) as string
-              )}`
-            )
+            throw new Error(`Property \`tree\` key \`${defPath}\` not found children nodes`)
           }
         }
       } else {
-        throw new Error(`property \`tree\` not found key \`${defPath}\``)
+        // throw new Error(`Property \`tree\` not found key \`${defPath}\`` + `, ${require('util').inspect(def)}`)
+        continue
       }
     }
   }
