@@ -10,16 +10,24 @@ export interface Row {
   disabled?: boolean
 }
 
-export type RequestPagination = { currentPage: number; totalPages: number }
-export type SourceType<T = Row> = { data: T[]; pagination?: RequestPagination | null }
-export type RequestConfig = { requestOpts?: any; pagination?: RequestPagination | null }
+export interface ResponsePagination extends Record<string, unknown> {
+  currentPage?: number
+  totalPages?: number
+  hasPreviousPage?: boolean
+  hasNextPage?: boolean
+}
+
+type SourceType<T = Row[]> = { data: T; pagination?: ResponsePagination }
 
 export interface TableSelectConfig<T extends Row = Row> {
   data?: T[]
 
   default?: T['value']
 
-  source?: (answers: inquirer.Answers, config: RequestConfig) => Promise<SourceType<T>> | SourceType<T>
+  source?: (
+    answers: inquirer.Answers,
+    context?: Record<string, unknown>
+  ) => Promise<SourceType<Row[]>> | SourceType<Row[]>
   tree?: TreeNode[]
   tab?: string
 
@@ -28,6 +36,10 @@ export interface TableSelectConfig<T extends Row = Row> {
 
   loop?: boolean
   pageSize?: number
+
+  prev?: (context: Record<string, unknown>) => void
+  next?: (context: Record<string, unknown>) => void
+  cache?: boolean
 }
 
 export enum Status {
@@ -51,10 +63,14 @@ export interface PropsState {
   isToggledHelp: boolean
   selectedIndex: number
   currentTabIndex: number
-  pagination?: RequestPagination | null
 }
 
 export enum Router {
   NORMAL,
   FILTER,
+}
+
+export enum PagiDirection {
+  PREV = -1,
+  NEXT = 1,
 }

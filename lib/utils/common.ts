@@ -42,18 +42,20 @@ export function isShallowEqual(objA: any, objB: any): boolean {
 
   return true
 }
-
+export const SEPERATOR_CHAR = ' • '
 export type Shortcut = { key: string; desc: string }
 export function generateHelpText(keyMap: Shortcut[], isToggledHelp: boolean) {
   const map: Shortcut[] = []
-  const stickyKeyMap = [{ key: '?', desc: 'toggle help' }]
+  const stickyKeyMap = [
+    !isToggledHelp ? { key: '?', desc: 'toggle help' } : { key: pc.cyan('?'), desc: pc.cyan('toggle help') },
+    // { key: 'q', desc: 'quit' },
+  ]
   if (isToggledHelp) {
     map.push(...keyMap)
   }
   map.push(...stickyKeyMap)
 
   const lines = map.map(({ key, desc }) => `${pc.gray(key)} ${pc.dim(pc.gray(desc))}`)
-  return chunk(lines, 3)
-    .map((arr) => arr.join(' • '))
-    .join('\n')
+  // return chunk(lines, 3).map((arr) => arr.join(SEPERATOR_CHAR)).join('\n')
+  return lines.join(SEPERATOR_CHAR)
 }

@@ -8,9 +8,7 @@ import pc = require('picocolors')
 import type ScreenManager = require('inquirer/lib/utils/screen-manager')
 import { generateHelpText, Shortcut } from './utils/common'
 
-type AsArray<T> = T[] | T
 type UnNormalizedChild = UnNormalizedTreeNode | string
-type UnNormalizedChildren = UnNormalizedChild[]
 export interface TreeNode {
   name?: string
   key?: string
@@ -19,47 +17,53 @@ export interface TreeNode {
   children: TreeNode[]
 
   open?: boolean
-  parent?: TreeNode
-  prepared?: boolean
-  root?: boolean
+  _parent?: TreeNode
+  _prepared?: boolean
+  _isRoot?: boolean
+  //   _root?: TreeNode
+  _selectedNode: TreeNode | null
+
   [key: string]: unknown
 }
 interface RootTreeNode extends TreeNode {
-  root: true
+  _isRoot: true
 }
 type UnNormalizedTreeNode = {
-  children: UnNormalizedChildren
+  children: UnNormalizedChild[]
 } & TreeNode
 type RawTreeNode = {
-  children: UnNormalizedChildren | ((...args: any[]) => UnNormalizedChildren)
+  children: UnNormalizedChild[] | ((...args: any[]) => UnNormalizedChild[])
 } & TreeNode
 interface Options {
   pageSize?: number
   tree: TreeNode[]
   loop?: boolean
   message: string
+  multiple?: boolean
 }
 
 export class FilterPage {
   protected isToggledHelp: boolean = false
   protected paginator: Paginator
 
-  protected tree!: TreeNode
+  protected tree!: { children: RootTreeNode[] }
   protected active!: TreeNode
-  // TODO: 数据结构由 array 改为 object：需要按照 node.key 重新排列 this.opt.key
   protected selectedList: TreeNode[] = []
   protected shownList: TreeNode[] = []
-  // TODO: 每一个顶级 TreeNode 下对应唯一一个子节点
+  // TODO: 每一个顶级 TreeNode 下对应子节点（单选模式）
   // TODO: 如果root节点open了：选中过的子节点的整个path上的所有父节点都open
-  protected selectedMap: Map<TreeNode, AsArray<Omit<TreeNode, 'children'>>> = new Map()
+  //   protected selectedMap: Map<TreeNode, AsArray<Omit<TreeNode, 'children'>>> = new Map()
 
   // TODO: 给定初始默认值，映射到 selectedList
   constructor(public rl: ReadLineInterface, public screen: ScreenManager, public opt: Options) {
     const tree = typeof this.opt.tree === 'function' ? this.opt.tree : cloneDeep(this.opt.tree)
+    // TODO: 数据结构由 array 改为 object：需要按照 node.key 重新排列 this.opt.key
     this.tree = {
       children: tree.map((firstLayerNode) => ({
-        root: true,
         ...firstLayerNode,
+        _isRoot: true,
+        _selectedNode: null,
+        multiple: false,
       })),
     }
     this.opt = { pageSize: 15, ...this.opt }
@@ -79,8 +83,8 @@ export class FilterPage {
       if (this.active.children && this.active.open) {
         this.active.open = false
       } else {
-        if (this.active.parent !== this.tree) {
-          this.active = this.active.parent!
+        if (this.active._parent !== this.tree) {
+          this.active = this.active._parent!
         }
       }
 
@@ -100,7 +104,11 @@ export class FilterPage {
     } else if (keyName === 'space') {
       this.toggleSelection()
     } else if (keyName === 'backspace') {
-      this.selectedList = []
+      this.tree.children
+        .filter(({ _isRoot, _selectedNode }) => _isRoot && _selectedNode)
+        .forEach((rootNode) => {
+          rootNode._selectedNode = null
+        })
       this.render()
     } else if (keyName === 'return') {
       return this.onSubmit()
@@ -120,8 +128,8 @@ export class FilterPage {
   }
 
   async prepareChildren(node: RawTreeNode | TreeNode) {
-    if (node.prepared) return
-    node.prepared = true
+    if (node._prepared) return
+    node._prepared = true
 
     //@ts-ignore
     await this.runChildrenFunctionIfRequired(node)
@@ -131,7 +139,6 @@ export class FilterPage {
     this.cloneAndNormaliseChildren(node)
     await this.validateAndFilterDescendants(node)
   }
-
   async runChildrenFunctionIfRequired(node: RawTreeNode) {
     if (typeof node.children === 'function') {
       try {
@@ -164,19 +171,17 @@ export class FilterPage {
       }
     }
   }
-
   cloneAndNormaliseChildren(node: UnNormalizedTreeNode) {
     node.children = node.children.map((item) => {
       if (typeof item !== 'object') return { value: item } as TreeNode
       return item
     })
   }
-
   async validateAndFilterDescendants(node: TreeNode) {
     for (let index = node.children.length - 1; index >= 0; index--) {
       const child = node.children[index]
 
-      child.parent = node
+      child._parent = node
 
       if (child.open) {
         await this.prepareChildren(child)
@@ -186,17 +191,15 @@ export class FilterPage {
 
   // TODO: 数据结构从flatten数组解析为chained对象
   onSubmit() {
-    if (this.selectedList) {
-      // return this.selectedList.map((item) => this.valueFor(item))
-      return this.selectedList.reduce((res, node) => {
-        let currNode: TreeNode = node
-        let _res = {}
-        while (node.parent) {
-          const { key } = node.parent
-        }
-        return merge(res, _res)
-      }, {} as any)
-    }
+    // return this.selectedList.map((item) => FilterPage.valueFor(item))
+    return this.selectedList.reduce((res, node) => {
+      let currNode: TreeNode = node
+      let _res = {}
+      while (node._parent) {
+        const { key } = node._parent
+      }
+      return merge(res, _res)
+    }, {} as any)
   }
 
   render() {
@@ -224,25 +227,33 @@ export class FilterPage {
       this.shownList.push(child)
       if (!this.active) this.active = child
 
+      const { open: isOpen, _isRoot: isRoot, _selectedNode } = child
       let prefix = child.children
-        ? child.open
+        ? isOpen
           ? figures.arrowDown + ' '
           : figures.arrowRight + ' '
         : child === this.active
         ? figures.pointer + ' '
         : '  '
+      let suffix = ''
 
       // TODO: 将答案显示在每一个 root 节点右侧
       //   if (this.opt.multiple) {
-      prefix += this.selectedList.includes(child) ? figures.radioOn : figures.radioOff
-      prefix += ' '
+
+      if (isRoot) suffix += this._selectedNode.map((item) => FilterPage.shortFor(item)).join(', ')
+      else {
+        if (this.opt.multiple) {
+          prefix += this.selectedList.includes(child) ? figures.radioOn : figures.radioOff
+          prefix += ' '
+        }
+      }
       //   }
 
-      const nameForChild = child.root === true ? pc.bold(pc.yellow(this.nameFor(child))) : this.nameFor(child)
+      const nameForChild = isRoot === true ? pc.bold(pc.gray(FilterPage.nameFor(child))) : FilterPage.nameFor(child)
       const showValue = ' '.repeat(indent) + prefix + nameForChild + '\n'
 
       if (child === this.active) {
-        if (child.root !== true) {
+        if (isRoot !== true) {
           output += pc.cyan(showValue)
         } else {
           output += pc.red(showValue)
@@ -251,7 +262,7 @@ export class FilterPage {
         output += showValue
       }
 
-      if (child.open) {
+      if (isOpen) {
         output += this.createTreeContent(child, indent + 2)
       }
     })
@@ -259,11 +270,11 @@ export class FilterPage {
     return output
   }
 
-  //   shortFor(node: TreeNode) {
-  //     return typeof node.short !== 'undefined' ? node.short : this.nameFor(node)
-  //   }
+  static shortFor(node: TreeNode) {
+    return typeof node.short !== 'undefined' ? node.short : FilterPage.nameFor(node)
+  }
 
-  nameFor(node: TreeNode) {
+  static nameFor(node: TreeNode) {
     if (typeof node.name !== 'undefined') {
       return node.name
     }
@@ -271,7 +282,7 @@ export class FilterPage {
     return node.value!.toString()
   }
 
-  valueFor(node: TreeNode) {
+  static valueFor(node: TreeNode) {
     return typeof node.value !== 'undefined' ? node.value : node.name
   }
 
@@ -297,7 +308,7 @@ export class FilterPage {
   }
 
   toggleSelection() {
-    if (this.active.root) {
+    if (this.active._isRoot) {
       this.toggleOpen(true)
     } else {
       const selectedIndex = this.selectedList.indexOf(this.active)

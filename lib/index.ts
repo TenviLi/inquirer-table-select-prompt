@@ -2,17 +2,19 @@
 // const runAsync = require('run-async')
 import type { Interface as ReadLineInterface } from 'readline'
 import { takeWhile } from 'rxjs/operators'
-import type {
+import {
   KeypressEvent,
+  PagiDirection,
   PropsState,
   RequestPagination,
+  ResponsePagination,
   Row,
   SourceType,
   TabChoiceList,
   TableSelectConfig,
 } from './types'
 import { Status, Router } from './types'
-import { chunk, generateHelpText, Shortcut } from './utils/common'
+import { generateHelpText, SEPERATOR_CHAR, Shortcut } from './utils/common'
 import { observeObject } from './utils/observe'
 import { Paginator } from './utils/paginator'
 import pc = require('picocolors')
@@ -30,7 +32,9 @@ const debug = Debug('inquirer-table-select:index')
 import { arc as dots } from 'cli-spinners'
 import type ScreenManager = require('inquirer/lib/utils/screen-manager')
 import { FilterPage } from './filter'
+import isPlainObject from 'lodash.isplainobject'
 
+// TODO: inquirer 的各种方法 支持 async，支持各种字段比如 filter transformer 等
 export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Question> {
   protected pageSize: number = this.opt.pageSize || 15
   protected readonly paginator = new Paginator(this.screen, {
@@ -47,7 +51,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     currentTabIndex: 0,
   }
   protected ui!: PropsState
-  protected pagination?: RequestPagination
+  protected pagination?: ResponsePagination
   public status = Status.Pending
   protected answer: any
   protected done!: (value: any) => void
@@ -71,7 +75,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     super(question, rl, answers)
     const { data, source, tree, tab } = this.opt
 
-    this.opt.default = null
+    this.opt.default = null // 禁用默认渲染行为
 
     assert.ok(data || source, 'Your muse provide `data` or `source` parameter')
     if (!source && ['tree', 'loadingText'].some((v) => v in this.opt)) this.throwParamError('source')
@@ -126,10 +130,10 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     const events = observe(this.rl)
     // const dontHaveAnswer = () => this.answer === undefined
     events.line
-      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined))
+      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined && this._ui.isLoading !== false))
       .forEach(this.onSubmit.bind(this))
     events.keypress
-      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined))
+      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined && this._ui.isLoading !== false))
       .forEach(this.onKeypress.bind(this))
     events.keypress.pipe(takeWhile(() => this.router === Router.FILTER)).forEach(() => {})
 
@@ -157,17 +161,13 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
         index = index > 0 ? index - 1 : this.data.length - 1
       } while (!isRowSelectable(this.data[index]))
       this.ui.selectedIndex = index
-    } else if (this.pagination && keyName === 'left') {
-      if (this.pagination.currentPage > 1) {
-        this.pagination.currentPage--
-        this.fetchData()
-      }
-    } else if (this.pagination && keyName === 'right') {
-      if (this.pagination.currentPage < this.pagination.totalPages) {
-        this.pagination.currentPage++
-        this.fetchData()
-      }
-    } else if (event.key.sequence === '/') {
+    } else if (this.pagination?.hasPreviousPage && this.opt.prev && keyName === 'left') {
+      this.opt.prev?.(this.requestOpts)
+      this.fetchData()
+    } else if (this.pagination?.hasNextPage && this.opt.next && keyName === 'right') {
+      this.opt.next?.(this.requestOpts)
+      this.fetchData()
+    } else if (event.key.sequence === '/' && keyName === 'f') {
       this.onRequestFilterPrompts()
     } else if (this.opt.tab && keyName === 'tab') {
       if (this.tabChoiceList) {
@@ -216,7 +216,14 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       debug('renderData::source')
       this.ui.selectedIndex = 0
       this.ui.isLoading = true
+      // await createSpinner(
+      //   this.screen,
+      //   this.getQuestion().replace(`${pc.green('?')} `, ''),
+      //   async () => {
       await this.request(payload)
+      //   },
+      //   this.opt.loadingText
+      // )
       const selectedIndex = this.data.findIndex((v: any) => v.value === this.opt?.default)
       this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
       this.ui.isLoading = false
@@ -231,17 +238,20 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     }
   }
 
-  async request(requestOpts = this.requestOpts || {}, pagination = this.pagination) {
+  async request(requestOpts = this.requestOpts || {}) {
     let thisPromise: Promise<SourceType>
     try {
-      const result = this.opt.source!(this.answers, { requestOpts, pagination })
+      const result = this.opt.source!(this.answers, { requestOpts })
       thisPromise = Promise.resolve(result)
     } catch (error) {
       thisPromise = Promise.reject(error)
     }
 
     const lastPromise = thisPromise
-    const { data, pagination: newPagination } = await thisPromise
+    const res = await thisPromise
+    assert.ok(isPlainObject(res), new Error('`Source` method need to return a plain object'))
+    const { data, pagination: newPagination } = res
+    assert.ok(Array.isArray(data), new Error('`Source` method need to return { data: Row[] }'))
     if (thisPromise !== lastPromise) return
 
     this.data = validateData(data)
@@ -253,11 +263,10 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     let content = this.getQuestion()
     let lines: string[] = []
     let bottomLines: string[] = []
-    const h = () => this.screen.render(content, lines.join('\n'))
 
     if (error) {
       lines = [`${pc.red('>> ')}${error}`]
-      return h()
+      return this.screen.render(content, lines.join('\n'))
     }
 
     // Tab
@@ -266,13 +275,14 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     if (this?.data?.length) {
       const { head, body } = renderTable(this.data, this.ui.selectedIndex)
       lines.push(pc.bgWhite(pc.bold(head[0])))
+      const len = head[1].length
 
       if (this.ui.isLoading) lines.push('  ' + pc.dim(this.opt.loadingText || 'Loading...'))
       else {
         lines.push(this.paginator.paginate(body, this.ui.selectedIndex, this.pageSize))
-        bottomLines.push(this.renderIndicator())
+        bottomLines.push(this.renderIndicator(len))
       }
-      bottomLines.push(renderLine(head[1].length))
+      bottomLines.push(renderLine(len))
     } else {
       //   content += this.rl.line
       lines.push('  ' + pc.yellow(this.opt.emptyText || 'No results...'))
@@ -281,13 +291,33 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     bottomLines.push('  ' + this.renderHelpText())
     lines.push(...bottomLines)
 
-    h()
+    this.screen.render(content, lines.join('\n'))
   }
 
-  renderIndicator() {
-    let res = '\n  ' + pc.dim(`Select ${this.ui.selectedIndex + 1}/${this.data.length} `)
-    if (this.pagination) res += ' · ' + pc.dim(`Page ${this.pagination.currentPage}/${this.pagination.totalPages}`)
-    return res
+  renderIndicator(limitSize: number) {
+    let left = '  ' + `Select ${this.ui.selectedIndex + 1}/${this.data.length}`
+    let right = ''
+    if (this.pagination) {
+      const { currentPage, totalPages, hasNextPage, hasPreviousPage } = this.pagination
+      if (currentPage && totalPages)
+        left += SEPERATOR_CHAR + `Page ${this.pagination.currentPage}/${this.pagination.totalPages}`
+
+      const rightChunk = []
+      hasPreviousPage && rightChunk.push(`← prev`)
+      hasNextPage && rightChunk.push(`next →`)
+
+      if (rightChunk.length) {
+        right = rightChunk.join(SEPERATOR_CHAR)
+
+        const spaceLen = limitSize - left.length - 2
+        if (spaceLen > SEPERATOR_CHAR.length) {
+          right = right.padStart(spaceLen, ' ').replace(right, rightChunk.map(pc.bold).join(SEPERATOR_CHAR))
+        } else {
+          right = pc.white(SEPERATOR_CHAR) + right
+        }
+      }
+    }
+    return '\n' + pc.dim(left) + pc.gray(right)
   }
 
   renderHelpText(isToggledHelp: boolean = this.ui.isToggledHelp) {
@@ -319,8 +349,10 @@ const renderTable = memoizeOne((rowCollections: Row[], pointer: number) => {
   const text = Table.print(
     rowCollections,
     (item, cell) => {
-      Object.entries(item.row).forEach(([key, value]) => {
-        cell(key, value)
+      const entries = Object.entries(item.row)
+      entries.forEach(([key, value], index) => {
+        if (index === entries.length - 1) return cell(`${key}  `, value)
+        return cell(key, value)
       })
     },
     (table) => {
@@ -377,7 +409,12 @@ const validateData = (collection: Row[]) => {
   return collection
 }
 
-const createSpinner = async (screen: ScreenManager, message: string, func: () => Promise<void>) => {
+const createSpinner = async (
+  screen: ScreenManager,
+  message: string,
+  func: () => Promise<void>,
+  loadingText?: string
+) => {
   let spinnerIndex = 0
   const spinner = setInterval(() => {
     spinnerIndex++
@@ -387,7 +424,11 @@ const createSpinner = async (screen: ScreenManager, message: string, func: () =>
     }
 
     const spinnerFrame = dots.frames[spinnerIndex]
-    screen.render(pc.blue(spinnerFrame) + ' ' + message, '')
+    screen.render(
+      `${pc.blue(spinnerFrame)} ${message}
+  ${pc.dim(loadingText || 'Loading...')}`,
+      ''
+    )
   }, dots.interval)
 
   await func()
