@@ -7,36 +7,32 @@ import Paginator from './utils/paginator'
 import pc = require('picocolors')
 import type ScreenManager = require('inquirer/lib/utils/screen-manager')
 import { generateHelpText, Shortcut } from './utils/common'
+import assert = require('assert')
 
-type UnNormalizedChild = UnNormalizedTreeNode | string
-export interface TreeNode {
+type AsFunction<T> = T | ((...args: any[]) => T)
+
+export interface TreeNode<T = Normalized> {
   name?: string
   key?: string
   value?: unknown
   short?: string
-  children: TreeNode[]
+  children?: T
 
   open?: boolean
   _parent?: TreeNode
   _prepared?: boolean
-  _isRoot?: boolean
-  //   _root?: TreeNode
-  _selectedNode: TreeNode | null
 
+  _isRoot?: boolean
+  _selectedNode?: TreeNode[]
   [key: string]: unknown
 }
-interface RootTreeNode extends TreeNode {
-  _isRoot: true
-}
-type UnNormalizedTreeNode = {
-  children: UnNormalizedChild[]
-} & TreeNode
-type RawTreeNode = {
-  children: UnNormalizedChild[] | ((...args: any[]) => UnNormalizedChild[])
-} & TreeNode
+
+type Normalized = Array<TreeNode>
+type UnNormalized = AsFunction<Array<TreeNode | string> | TreeNode>
+
 interface Options {
   pageSize?: number
-  tree: TreeNode[]
+  tree: UnNormalized
   loop?: boolean
   message: string
   multiple?: boolean
@@ -45,32 +41,24 @@ interface Options {
 export class FilterPage {
   protected isToggledHelp: boolean = false
   protected paginator: Paginator
+  protected done!: Function
 
-  protected tree!: { children: RootTreeNode[] }
+  protected tree!: TreeNode<Normalized>
   protected active!: TreeNode
   protected selectedList: TreeNode[] = []
   protected shownList: TreeNode[] = []
-  // TODO: 每一个顶级 TreeNode 下对应子节点（单选模式）
   // TODO: 如果root节点open了：选中过的子节点的整个path上的所有父节点都open
-  //   protected selectedMap: Map<TreeNode, AsArray<Omit<TreeNode, 'children'>>> = new Map()
-
   // TODO: 给定初始默认值，映射到 selectedList
   constructor(public rl: ReadLineInterface, public screen: ScreenManager, public opt: Options) {
-    const tree = typeof this.opt.tree === 'function' ? this.opt.tree : cloneDeep(this.opt.tree)
-    // TODO: 数据结构由 array 改为 object：需要按照 node.key 重新排列 this.opt.key
-    this.tree = {
-      children: tree.map((firstLayerNode) => ({
-        ...firstLayerNode,
-        _isRoot: true,
-        _selectedNode: null,
-        multiple: false,
-      })),
+    this.opt = {
+      pageSize: 15,
+      multiple: false,
+      ...this.opt,
     }
-    this.opt = { pageSize: 15, ...this.opt }
     this.paginator = new Paginator(this.screen, { isInfinite: this.opt.loop !== false })
   }
 
-  onKeypress(event: KeypressEvent) {
+  public onKeypress(event: KeypressEvent) {
     const keyName = (event.key && event.key.name) || undefined
 
     if (keyName === 'h' || event.key.sequence === '?' || event.key.sequence === '？') {
@@ -94,112 +82,70 @@ export class FilterPage {
         if (!this.active.open) {
           this.active.open = true
 
-          this.prepareChildrenAndRender(this.active)
+          prepareChildren(this.active).then(() => this.render())
         } else if (this.active.children.length) {
           this.moveActive(1)
         }
       }
-    } else if (keyName === 'right') {
+    } else if (keyName === 'tab') {
       this.toggleOpen()
     } else if (keyName === 'space') {
       this.toggleSelection()
     } else if (keyName === 'backspace') {
-      this.tree.children
-        .filter(({ _isRoot, _selectedNode }) => _isRoot && _selectedNode)
+      this.tree
+        .children!.filter(({ _isRoot }) => _isRoot)
         .forEach((rootNode) => {
-          rootNode._selectedNode = null
+          rootNode._selectedNode = []
         })
       this.render()
     } else if (keyName === 'return') {
-      return this.onSubmit()
+      this.onSubmit()
     } else if (keyName === 'escape') {
-      return 0
+      this.done({})
     }
   }
 
-  async _run() {
-    await this.prepareChildrenAndRender(this.tree as RawTreeNode)
-  }
+  public async _run(done: Function) {
+    this.done = done
 
-  async prepareChildrenAndRender(rawNode: RawTreeNode) {
-    await this.prepareChildren(rawNode)
+    const tree: TreeNode<UnNormalized> = {
+      children: typeof this.opt.tree === 'function' ? this.opt.tree : cloneDeep(this.opt.tree),
+    }
+    await runChildrenFunctionIfRequired(tree)
+    assert.ok(tree.children, 'property `tree` not found children')
 
+    for (const node of tree.children as Normalized) {
+      await prepareChildren(node)
+      ;(tree.children as Normalized)?.forEach((firstLayerNode) => ({
+        ...firstLayerNode,
+        _isRoot: true,
+        _selectedNode: [],
+      }))
+    }
+
+    this.tree = tree as TreeNode<Normalized>
     this.render()
-  }
-
-  async prepareChildren(node: RawTreeNode | TreeNode) {
-    if (node._prepared) return
-    node._prepared = true
-
-    //@ts-ignore
-    await this.runChildrenFunctionIfRequired(node)
-    //@ts-ignore
-    if (!node.children) return
-
-    this.cloneAndNormaliseChildren(node)
-    await this.validateAndFilterDescendants(node)
-  }
-  async runChildrenFunctionIfRequired(node: RawTreeNode) {
-    if (typeof node.children === 'function') {
-      try {
-        const nodeOrChildren = await node.children()
-        if (nodeOrChildren) {
-          let children
-          if (Array.isArray(nodeOrChildren)) {
-            children = nodeOrChildren
-          } else {
-            //@ts-ignore
-            const temp: UnNormalizedTreeNode = nodeOrChildren
-            children = temp.children
-            ;['name', 'value', 'short'].forEach((property) => {
-              node[property] = temp[property]
-            })
-          }
-
-          //@ts-ignore
-          return (node.children = cloneDeep(children))
-        }
-      } catch (e) {
-        /*
-         * if something goes wrong gathering the children, ignore it;
-         * it could be something like permission denied for a single
-         * directory in a file hierarchy
-         */
-
-        //@ts-ignore
-        node.children = null
-      }
-    }
-  }
-  cloneAndNormaliseChildren(node: UnNormalizedTreeNode) {
-    node.children = node.children.map((item) => {
-      if (typeof item !== 'object') return { value: item } as TreeNode
-      return item
-    })
-  }
-  async validateAndFilterDescendants(node: TreeNode) {
-    for (let index = node.children.length - 1; index >= 0; index--) {
-      const child = node.children[index]
-
-      child._parent = node
-
-      if (child.open) {
-        await this.prepareChildren(child)
-      }
-    }
   }
 
   // TODO: 数据结构从flatten数组解析为chained对象
   onSubmit() {
-    // return this.selectedList.map((item) => FilterPage.valueFor(item))
-    return this.selectedList.reduce((res, node) => {
-      let currNode: TreeNode = node
-      let _res = {}
-      while (node._parent) {
-        const { key } = node._parent
+    // return this.selectedList.map((item) => valueFor(item))
+    // return this.selectedList.reduce((res, node) => {
+    //   let currNode: TreeNode = node
+    //   let _res = {}
+    //   while (node._parent) {
+    //     const { key } = node._parent
+    //   }
+    //   return merge(res, _res)
+    // }, {} as any)
+
+    const res = {}
+    this.tree.children!.forEach((rootNode) => {
+      if (rootNode._selectedNode?.length) {
+        merge(res, recursiveKeyify(rootNode._selectedNode))
       }
-      return merge(res, _res)
-    }, {} as any)
+    })
+    this.done(res)
   }
 
   render() {
@@ -219,7 +165,7 @@ export class FilterPage {
   }
 
   // TODO: 子节点选中后，其他兄弟子节点置灰处理（？）
-  createTreeContent(node = this.tree, indent = 2) {
+  createTreeContent(node: TreeNode = this.tree, indent = 2) {
     const children: TreeNode[] = node.children || []
     let output = ''
 
@@ -235,31 +181,36 @@ export class FilterPage {
         : child === this.active
         ? figures.pointer + ' '
         : '  '
-      let suffix = ''
+      let suffix = ' '
 
-      // TODO: 将答案显示在每一个 root 节点右侧
-      //   if (this.opt.multiple) {
-
-      if (isRoot) suffix += this._selectedNode.map((item) => FilterPage.shortFor(item)).join(', ')
-      else {
-        if (this.opt.multiple) {
-          prefix += this.selectedList.includes(child) ? figures.radioOn : figures.radioOff
-          prefix += ' '
-        }
+      if (isRoot) {
+        if (_selectedNode?.length) suffix += pc.cyan(_selectedNode!.map((item) => shortFor(item)).join(', '))
+      } else {
+        const rootNode = recursiveFindRootNode(child)
+        // if (this.opt.multiple) {
+        prefix += rootNode._selectedNode!.includes(child) ? figures.radioOn : figures.radioOff
+        prefix += ' '
+        // } else {
+        //   prefix +=
+        // }
       }
-      //   }
 
-      const nameForChild = isRoot === true ? pc.bold(pc.gray(FilterPage.nameFor(child))) : FilterPage.nameFor(child)
-      const showValue = ' '.repeat(indent) + prefix + nameForChild + '\n'
+      const nameForChild = isRoot === true ? pc.bold(nameFor(child)) : nameFor(child)
+      const showValue = ' '.repeat(indent) + prefix + nameForChild + suffix + '\n'
 
       if (child === this.active) {
         if (isRoot !== true) {
           output += pc.cyan(showValue)
         } else {
-          output += pc.red(showValue)
+          // output += pc.red(showValue)
+          output += showValue
         }
       } else {
-        output += showValue
+        if (isRoot !== true) {
+          output += showValue
+        } else {
+          output += pc.gray(showValue)
+        }
       }
 
       if (isOpen) {
@@ -268,22 +219,6 @@ export class FilterPage {
     })
 
     return output
-  }
-
-  static shortFor(node: TreeNode) {
-    return typeof node.short !== 'undefined' ? node.short : FilterPage.nameFor(node)
-  }
-
-  static nameFor(node: TreeNode) {
-    if (typeof node.name !== 'undefined') {
-      return node.name
-    }
-
-    return node.value!.toString()
-  }
-
-  static valueFor(node: TreeNode) {
-    return typeof node.value !== 'undefined' ? node.value : node.name
   }
 
   moveActive(distance = 0) {
@@ -309,17 +244,31 @@ export class FilterPage {
 
   toggleSelection() {
     if (this.active._isRoot) {
-      this.toggleOpen(true)
+      this.toggleOpen()
     } else {
-      const selectedIndex = this.selectedList.indexOf(this.active)
-      if (selectedIndex === -1) {
-        this.selectedList.push(this.active)
+      // const selectedIndex = this.selectedList.indexOf(this.active)
+      // if (selectedIndex === -1) {
+      //   this.selectedList.push(this.active)
+      // } else {
+      //   this.selectedList.splice(selectedIndex, 1)
+      // }
+      const rootNode = recursiveFindRootNode(this.active)
+      const selectedIndex = rootNode._selectedNode!.indexOf(this.active)
+      if (this.opt.multiple) {
+        if (selectedIndex === -1) {
+          rootNode._selectedNode!.push(this.active)
+        } else {
+          rootNode._selectedNode!.splice(selectedIndex, 1)
+        }
       } else {
-        this.selectedList.splice(selectedIndex, 1)
+        if (selectedIndex === -1) {
+          rootNode._selectedNode! = [this.active]
+        } else {
+          rootNode._selectedNode! = []
+        }
       }
+      this.render()
     }
-
-    this.render()
   }
 
   toggleOpen(enforce?: boolean) {
@@ -342,4 +291,99 @@ export class FilterPage {
     ]
     return generateHelpText(keyMap, isToggledHelp)
   }
+}
+
+const runChildrenFunctionIfRequired = async (node: TreeNode<UnNormalized>) => {
+  if (typeof node.children === 'function') {
+    try {
+      const nodeOrChildren = await node.children()
+
+      if (nodeOrChildren) {
+        let children
+        if (Array.isArray(nodeOrChildren)) {
+          children = nodeOrChildren
+        } else {
+          children = nodeOrChildren.children
+          ;['name', 'value', 'short'].forEach((property) => {
+            node[property] = nodeOrChildren[property]
+          })
+        }
+
+        node.children = cloneDeep(children)
+      }
+    } catch (e) {
+      //@ts-ignore
+      node.children = null
+    }
+  }
+}
+
+const prepareChildren = async (node: TreeNode<UnNormalized>) => {
+  // 无用的逻辑，仅用于标记
+  if (node._prepared) return
+  node._prepared = true
+
+  // 动态使用函数生成 TreeNode[]
+  await runChildrenFunctionIfRequired(node)
+
+  // 拦截 null or undefined
+  if (!node.children) return
+
+  // Normalize
+  node.children = (node.children as Array<TreeNode | string>).map((item) => {
+    if (typeof item !== 'object') return { value: item }
+    return item
+  }) as Normalized
+
+  await validateAndFilterDescendants(node as TreeNode<Normalized>)
+}
+
+const validateAndFilterDescendants = async (node: TreeNode<Normalized>) => {
+  for (let index = node.children!.length - 1; index >= 0; index--) {
+    const child = node.children![index]
+
+    child._parent = node
+
+    if (child.open) {
+      await prepareChildren(child)
+    }
+  }
+}
+
+const shortFor = (node: TreeNode) => {
+  return typeof node.short !== 'undefined' ? node.short : nameFor(node)
+}
+
+const nameFor = (node: TreeNode) => {
+  if (typeof node.name !== 'undefined') {
+    return node.name
+  }
+
+  return node.value!.toString()
+}
+
+const valueFor = (node: TreeNode) => {
+  return typeof node.value !== 'undefined' ? node.value : node.name
+}
+
+const recursiveFindRootNode = (node: TreeNode) => {
+  let side = node
+  while (!side._isRoot) {
+    side = node._parent!
+  }
+  return side
+}
+
+const recursiveKeyify = (nodes: TreeNode[]) => {
+  const res = {}
+  for (const node of nodes) {
+    let val = valueFor(node)
+    let side = node
+    do {
+      side = node._parent!
+      val = { [side.key!]: val }
+    } while (!side._isRoot)
+    merge(res, val)
+  }
+  return res
 }

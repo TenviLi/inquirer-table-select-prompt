@@ -1,6 +1,6 @@
 import type inquirer = require('inquirer')
 import type { Key } from 'readline'
-import { TreeNode } from './filter'
+import type { TreeNode } from './filter'
 
 export interface Row {
   name?: string
@@ -17,7 +17,7 @@ export interface ResponsePagination extends Record<string, unknown> {
   hasNextPage?: boolean
 }
 
-type SourceType<T = Row[]> = { data: T; pagination?: ResponsePagination }
+export type SourceType<T = Row[]> = { data: T; pagination?: ResponsePagination }
 
 export interface TableSelectConfig<T extends Row = Row> {
   data?: T[]
@@ -29,7 +29,7 @@ export interface TableSelectConfig<T extends Row = Row> {
     context?: Record<string, unknown>
   ) => Promise<SourceType<Row[]>> | SourceType<Row[]>
   tree?: TreeNode[]
-  tab?: string
+  tab?: TreeNode
 
   loadingText?: string
   emptyText?: string
@@ -54,7 +54,7 @@ export type KeypressEvent = {
   value: string
 }
 
-export type TabChoiceList = inquirer.ExpandChoiceMap[keyof inquirer.ExpandChoiceMap][]
+// export type TabChoiceList = inquirer.ExpandChoiceMap[keyof inquirer.ExpandChoiceMap][]
 
 export interface PropsState {
   // isLoadingOnce: boolean

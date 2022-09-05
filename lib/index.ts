@@ -1,38 +1,30 @@
 // import ansiEscapes from 'ansi-escapes'
 // const runAsync = require('run-async')
+import { arc as dots } from 'cli-spinners'
+import Debug from 'debug'
+import Table from 'easy-table'
+import figures from 'figures'
+import isPlainObject from 'lodash.isplainobject'
+import memoizeOne from 'memoize-one'
 import type { Interface as ReadLineInterface } from 'readline'
 import { takeWhile } from 'rxjs/operators'
-import {
-  KeypressEvent,
-  PagiDirection,
-  PropsState,
-  RequestPagination,
-  ResponsePagination,
-  Row,
-  SourceType,
-  TabChoiceList,
-  TableSelectConfig,
-} from './types'
-import { Status, Router } from './types'
+import type { TreeNode } from './filter'
+import { FilterPage } from './filter'
+import type { KeypressEvent, PropsState, ResponsePagination, Row, SourceType, TableSelectConfig } from './types'
+import { Router, Status } from './types'
 import { generateHelpText, SEPERATOR_CHAR, Shortcut } from './utils/common'
 import { observeObject } from './utils/observe'
 import { Paginator } from './utils/paginator'
 import pc = require('picocolors')
-import figures from 'figures'
 import Base = require('inquirer/lib/prompts/base')
 import observe = require('inquirer/lib/utils/events')
 import utils = require('inquirer/lib/utils/readline')
-import Table from 'easy-table'
 import inquirer = require('inquirer')
 import assert = require('assert')
 import cliCursor = require('cli-cursor')
-import memoizeOne from 'memoize-one'
-import Debug from 'debug'
 const debug = Debug('inquirer-table-select:index')
-import { arc as dots } from 'cli-spinners'
 import type ScreenManager = require('inquirer/lib/utils/screen-manager')
-import { FilterPage } from './filter'
-import isPlainObject from 'lodash.isplainobject'
+import merge = require('lodash.merge')
 
 // TODO: inquirer 的各种方法 支持 async，支持各种字段比如 filter transformer 等
 export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Question> {
@@ -42,7 +34,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     isShowHelp: false,
   })
   protected tabChoiceKey?: string
-  protected tabChoiceList?: TabChoiceList
+  protected tabChoiceList?: TreeNode[]
 
   protected _ui: PropsState = {
     isLoading: true,
@@ -90,15 +82,9 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     }
 
     if (tab) {
-      if (!tree) this.throwParamError('tree')
-
-      const index = tree!.findIndex((v) => v.name === tab)
-      if (!index) this.throwParamError('tab')
-      else {
-        const { name, choices } = tree!.splice(index, 1)[0]
-        this.tabChoiceKey = name
-        this.tabChoiceList = choices.filter((choice) => choice.type !== 'separator')
-      }
+      const { children, key } = tab
+      this.tabChoiceKey = key
+      this.tabChoiceList = children
     }
   }
 
@@ -135,7 +121,9 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     events.keypress
       .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined && this._ui.isLoading !== false))
       .forEach(this.onKeypress.bind(this))
-    events.keypress.pipe(takeWhile(() => this.router === Router.FILTER)).forEach(() => {})
+    events.keypress
+      .pipe(takeWhile(() => this.router === Router.FILTER && !this.filterPage))
+      .forEach(this.filterPage!.onKeypress.bind(this.filterPage!))
 
     return this
   }
@@ -167,8 +155,14 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     } else if (this.pagination?.hasNextPage && this.opt.next && keyName === 'right') {
       this.opt.next?.(this.requestOpts)
       this.fetchData()
-    } else if (event.key.sequence === '/' && keyName === 'f') {
-      this.onRequestFilterPrompts()
+    } else if (this.opt.tree && event.key.sequence === '/' && keyName === 'f') {
+      this.router = Router.FILTER
+      this.filterPage?._run((options: any) => {
+        this.filterPage = undefined
+        merge(this.requestOpts, options)
+        this.router = Router.NORMAL
+        this.renderNormal()
+      })
     } else if (this.opt.tab && keyName === 'tab') {
       if (this.tabChoiceList) {
         const payload = { ...this.requestOpts, [this.tabChoiceKey!]: this.currentTabValue }
@@ -190,25 +184,6 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
   async onTabSwitched() {
     this.ui.currentTabIndex = this.ui.currentTabIndex++ % this.tabChoiceList!.length
-  }
-
-  async onRequestFilterPrompts() {
-    // TODO: 上次设置的值作为当前默认值
-    if (this.opt.tree?.length) {
-      const res = await inquirer.prompt(this.opt.tree)
-      const confirm = await askForApplyFilters()
-      this.screen.clean(1)
-      if (confirm === 'clear') {
-        this.requestOpts = {}
-      } else if (confirm === 'submit') {
-        if (Object.keys(res).some((key) => res[key] != this.requestOpts[key])) {
-          this.requestOpts = res
-          await this.request()
-        }
-      } else if (confirm === 'cancel') {
-        this.renderNormal()
-      }
-    }
   }
 
   async fetchData(payload = this.requestOpts) {
@@ -333,7 +308,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   }
 }
 
-const renderTab = memoizeOne((tabs: TabChoiceList, activeIndex: number) => {
+const renderTab = memoizeOne((tabs: TreeNode[], activeIndex: number) => {
   const seperator = ' | '
   const res = tabs!
     .map((choice, index) => {
@@ -383,22 +358,6 @@ const renderLine = memoizeOne((strokeSize: number) => {
 
 const isRowSelectable = (row: Row) => {
   return row && !row.disabled
-}
-
-const askForApplyFilters = async () => {
-  const { confirmApply } = await inquirer.prompt({
-    default: true,
-    type: 'expand',
-    name: 'confirmApply',
-    message: 'Confirm submitting those filters?',
-    choices: [
-      { key: 'y', name: 'Submit', value: 'submit' },
-      { key: 'n', name: 'Cancel', value: 'cancel' },
-      new inquirer.Separator(),
-      { key: 'c', name: 'Clear', value: 'clear' },
-    ],
-  })
-  return confirmApply
 }
 
 const validateData = (collection: Row[]) => {
