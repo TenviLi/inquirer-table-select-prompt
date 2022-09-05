@@ -1,3 +1,5 @@
+import pc from 'picocolors'
+
 export const chunk = <T>(arr: T[], chunkSize = 1, cache: Array<T[]> = []) => {
   const tmp = [...arr]
   if (chunkSize <= 0) return cache
@@ -39,4 +41,24 @@ export function isShallowEqual(objA: any, objB: any): boolean {
   }
 
   return true
+}
+
+export type Shortcut = { key: string; desc: string }
+export function generateHelpText(keyMap: Shortcut[], isToggledHelp: boolean) {
+  const map: Shortcut[] = []
+  const stickyKeyMap = [
+    { key: '?', desc: 'toggle help' },
+    { key: 'q', desc: 'quit' },
+  ]
+  if (isToggledHelp) {
+    map.push({ key: `↑/↓`, desc: 'scroll' })
+    map.push({ key: `enter`, desc: 'submit' })
+    map.push(...keyMap)
+  }
+  map.push(...stickyKeyMap)
+
+  const lines = map.map(({ key, desc }) => `${pc.gray(key)} ${pc.dim(pc.gray(desc))}`)
+  return chunk(lines, 3)
+    .map((arr) => arr.join(' • '))
+    .join('\n')
 }

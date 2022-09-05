@@ -54,3 +54,8 @@ export interface PropsState {
   currentTabIndex: number
   pagination?: RequestPagination | null
 }
+
+export enum Router {
+  NORMAL,
+  FILTER,
+}

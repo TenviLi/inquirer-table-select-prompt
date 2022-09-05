@@ -11,8 +11,8 @@ import type {
   TabChoiceList,
   TableSelectConfig,
 } from './types'
-import { Status } from './types'
-import { chunk } from './utils/common'
+import { Status, Router } from './types'
+import { chunk, generateHelpText, Shortcut } from './utils/common'
 import { observeObject } from './utils/observe'
 import { Paginator } from './utils/paginator'
 import pc = require('picocolors')
@@ -28,6 +28,8 @@ import memoizeOne from 'memoize-one'
 import Debug from 'debug'
 const debug = Debug('inquirer-table-select:index')
 import { arc as dots } from 'cli-spinners'
+import type ScreenManager = require('inquirer/lib/utils/screen-manager')
+import { FilterPage } from './filter'
 
 export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Question> {
   protected pageSize: number = this.opt.pageSize || 15
@@ -51,7 +53,10 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   protected done!: (value: any) => void
 
   protected data: Row[] = []
+
   protected requestOpts: Record<string, unknown> = {}
+  protected router: Router = Router.NORMAL
+  protected filterPage?: FilterPage
 
   get currentTabValue() {
     //@ts-ignore
@@ -68,6 +73,12 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     assert.ok(this.opt.data || this.opt.source, 'Your muse provide `data` or `source` parameter')
     if (!this.opt.source && ['sourcePrompts', 'loadingText'].some((v) => v in this.opt)) this.throwParamError('source')
 
+    if (this.opt.sourcePrompts) {
+      this.filterPage = new FilterPage(this.rl, this.screen, {
+        tree: this.opt.sourcePrompts,
+      })
+    }
+
     if (this.opt.tab) {
       if (!this.opt.sourcePrompts) this.throwParamError('sourcePrompts')
 
@@ -81,41 +92,41 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     }
   }
 
-  _run(cb: (value: any) => void) {
+  render() {
+    if (this.router === Router.NORMAL) {
+      this.renderNormal()
+    }
+  }
+
+  async _run(cb: (value: any) => void) {
     this.done = cb
     cliCursor.hide()
 
     const [observedObject, observedObjectChange$] = observeObject(this._ui)
     this.ui = observedObject
 
-    const content = this.getQuestion()
-    let spinnerIndex = 0
-    const spinner = setInterval(() => {
-      spinnerIndex++
-
-      if (spinnerIndex >= dots.frames.length) {
-        spinnerIndex = 0
-      }
-
-      const spinnerFrame = dots.frames[spinnerIndex]
-      this.screen.render(content.replace(pc.green('?'), pc.blue(spinnerFrame)), '')
-    }, dots.interval)
-
-    this.fetchData().then(() => {
-      clearInterval(spinner)
-      debug('_run')
-      this.render()
-
-      observedObjectChange$.subscribe((changes: any) => {
-        debug(changes)
-        this.render()
-      })
-
-      const events = observe(this.rl)
-      const dontHaveAnswer = () => this.answer === undefined
-      events.line.pipe(takeWhile(dontHaveAnswer)).forEach(this.onSubmit.bind(this))
-      events.keypress.pipe(takeWhile(dontHaveAnswer)).forEach(this.onKeypress.bind(this))
+    await createSpinner(this.screen, this.getQuestion().replace(`${pc.green('?')} `, ''), async () => {
+      await this.fetchData()
     })
+
+    debug('_run')
+    this.renderNormal()
+
+    observedObjectChange$.subscribe((changes: any) => {
+      debug(changes)
+      this.renderNormal()
+    })
+
+    const events = observe(this.rl)
+    // const dontHaveAnswer = () => this.answer === undefined
+    events.line
+      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined))
+      .forEach(this.onSubmit.bind(this))
+    events.keypress
+      .pipe(takeWhile(() => this.router === Router.NORMAL && this.answer === undefined))
+      .forEach(this.onKeypress.bind(this))
+    events.keypress.pipe(takeWhile(() => this.router === Router.FILTER)).forEach(() => {})
+
     return this
   }
 
@@ -124,10 +135,9 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
     if (event.key.name === 'q') process.exit(0)
 
-    if (this.ui.isToggledHelp) return
-    if (event.key.name === 'h' || event.key.sequence === '?' || event.key.sequence === '？') {
+    // if (this.ui.isToggledHelp) return
+    if (keyName === 'h' || event.key.sequence === '?' || event.key.sequence === '？') {
       this.ui.isToggledHelp = !this.ui.isToggledHelp
-      // this.render()
     } else if (keyName === 'down' || (keyName === 'n' && event.key.ctrl)) {
       let index = this.ui.selectedIndex
       do {
@@ -135,14 +145,12 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       } while (!isRowSelectable(this.data[index]))
       this.ui.selectedIndex = index
       utils.up(this.rl, 2)
-      // this.render()
     } else if (keyName === 'up' || (keyName === 'p' && event.key.ctrl)) {
       let index = this.ui.selectedIndex
       do {
         index = index > 0 ? index - 1 : this.data.length - 1
       } while (!isRowSelectable(this.data[index]))
       this.ui.selectedIndex = index
-      // this.render()
     } else if (this.pagination && keyName === 'left') {
       if (this.pagination.currentPage > 1) {
         this.pagination.currentPage--
@@ -176,7 +184,6 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
   async onTabSwitched() {
     this.ui.currentTabIndex = this.ui.currentTabIndex++ % this.tabChoiceList!.length
-    // this.render()
   }
 
   async onRequestFilterPrompts() {
@@ -194,7 +201,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
           await this.request()
         }
       } else if (confirm === 'cancel') {
-        this.render()
+        this.renderNormal()
       }
     }
   }
@@ -216,7 +223,6 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       this.ui.selectedIndex = selectedIndex !== -1 ? selectedIndex : 0
       this.ui.isLoading = false
       debug('fetchData end')
-      // this.render()
     }
   }
 
@@ -237,7 +243,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     if (newPagination) this.pagination = newPagination
   }
 
-  render(error?: string) {
+  renderNormal(error?: string) {
     debug('render')
     let content = this.getQuestion()
     let lines: string[] = []
@@ -280,36 +286,11 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   }
 
   renderHelpText(isToggledHelp: boolean = this.ui.isToggledHelp) {
-    const stickyKeyMap = [
-      { key: '?', desc: 'toggle help' },
-      { key: 'q', desc: 'quit' },
-    ]
-    let keyMap = []
-    if (isToggledHelp) {
-      keyMap.push({ key: `↑/↓`, desc: 'scroll' })
-      if (this.pagination) keyMap.push({ key: `←/→`, desc: 'turn pages' })
-      if (this.opt.sourcePrompts) keyMap.push({ key: `/`, desc: '/' })
-      if (this.opt.tab) keyMap.push({ key: `tab`, desc: 'switch tabs' })
-    }
-    keyMap.push(...stickyKeyMap)
-
-    // return (
-    //   pc.dim('Shortcuts:\n') +
-    //   Table.print(
-    //     sc,
-    //     (item: any, cell) => {
-    //       cell('key', '  ' + pc.cyan(item.key))
-    //       cell('description', '  ' + pc.dim(item.desc))
-    //     },
-    //     (table) => table.print()
-    //   ) +
-    //   '\n'
-    // )
-
-    keyMap = keyMap.map(({ key, desc }) => `${pc.gray(key)} ${pc.dim(pc.gray(desc))}`)
-    return chunk(keyMap, 3)
-      .map((arr) => arr.join(' • '))
-      .join('\n')
+    const keyMap: Shortcut[] = []
+    if (this.pagination) keyMap.push({ key: `←/→`, desc: 'turn pages' })
+    if (this.opt.sourcePrompts) keyMap.push({ key: `/`, desc: '/' })
+    if (this.opt.tab) keyMap.push({ key: `tab`, desc: 'switch tabs' })
+    return generateHelpText(keyMap, isToggledHelp)
   }
 }
 
@@ -385,4 +366,22 @@ const validateData = (collection: Row[]) => {
     'Every data item must have a `row` property'
   )
   return collection
+}
+
+const createSpinner = async (screen: ScreenManager, message: string, func: () => Promise<void>) => {
+  let spinnerIndex = 0
+  const spinner = setInterval(() => {
+    spinnerIndex++
+
+    if (spinnerIndex >= dots.frames.length) {
+      spinnerIndex = 0
+    }
+
+    const spinnerFrame = dots.frames[spinnerIndex]
+    screen.render(pc.blue(spinnerFrame) + ' ' + message, '')
+  }, dots.interval)
+
+  await func()
+  clearInterval(spinner)
+  return spinner
 }
