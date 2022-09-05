@@ -1,0 +1,12 @@
+examples/
+.gitignore
+tsconfig.json
+
+# Typescript
+*.tsbuildinfo
+lib/**/*.js.map
+lib/**/*.js
+lib/**/*.d.ts
+test/**/*.js.map
+test/**/*.js
+test/**/*.d.ts
