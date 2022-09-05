@@ -46,13 +46,8 @@ export function isShallowEqual(objA: any, objB: any): boolean {
 export type Shortcut = { key: string; desc: string }
 export function generateHelpText(keyMap: Shortcut[], isToggledHelp: boolean) {
   const map: Shortcut[] = []
-  const stickyKeyMap = [
-    { key: '?', desc: 'toggle help' },
-    { key: 'q', desc: 'quit' },
-  ]
+  const stickyKeyMap = [{ key: '?', desc: 'toggle help' }]
   if (isToggledHelp) {
-    map.push({ key: `↑/↓`, desc: 'scroll' })
-    map.push({ key: `enter`, desc: 'submit' })
     map.push(...keyMap)
   }
   map.push(...stickyKeyMap)

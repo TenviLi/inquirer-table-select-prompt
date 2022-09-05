@@ -69,23 +69,29 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
   constructor(question: inquirer.Question<inquirer.Answers>, rl: ReadLineInterface, answers: inquirer.Answers) {
     super(question, rl, answers)
+    const { data, source, tree, tab } = this.opt
 
-    assert.ok(this.opt.data || this.opt.source, 'Your muse provide `data` or `source` parameter')
-    if (!this.opt.source && ['sourcePrompts', 'loadingText'].some((v) => v in this.opt)) this.throwParamError('source')
+    this.opt.default = null
 
-    if (this.opt.sourcePrompts) {
+    assert.ok(data || source, 'Your muse provide `data` or `source` parameter')
+    if (!source && ['tree', 'loadingText'].some((v) => v in this.opt)) this.throwParamError('source')
+
+    if (tree) {
       this.filterPage = new FilterPage(this.rl, this.screen, {
-        tree: this.opt.sourcePrompts,
+        tree,
+        message: `${this.getQuestion()}
+  Filters:
+`,
       })
     }
 
-    if (this.opt.tab) {
-      if (!this.opt.sourcePrompts) this.throwParamError('sourcePrompts')
+    if (tab) {
+      if (!tree) this.throwParamError('tree')
 
-      const index = this.opt.sourcePrompts!.findIndex((v) => v.name === this.opt.tab)
+      const index = tree!.findIndex((v) => v.name === tab)
       if (!index) this.throwParamError('tab')
       else {
-        const { name, choices } = this.opt.sourcePrompts!.splice(index, 1)[0]
+        const { name, choices } = tree!.splice(index, 1)[0]
         this.tabChoiceKey = name
         this.tabChoiceList = choices.filter((choice) => choice.type !== 'separator')
       }
@@ -188,9 +194,8 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
 
   async onRequestFilterPrompts() {
     // TODO: 上次设置的值作为当前默认值
-    // TODO: 支持快捷键的树形折叠多列表选择组件
-    if (this.opt.sourcePrompts?.length) {
-      const res = await inquirer.prompt(this.opt.sourcePrompts)
+    if (this.opt.tree?.length) {
+      const res = await inquirer.prompt(this.opt.tree)
       const confirm = await askForApplyFilters()
       this.screen.clean(1)
       if (confirm === 'clear') {
@@ -286,9 +291,13 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
   }
 
   renderHelpText(isToggledHelp: boolean = this.ui.isToggledHelp) {
-    const keyMap: Shortcut[] = []
+    const keyMap: Shortcut[] = [
+      { key: 'q', desc: 'quit' },
+      { key: `enter`, desc: 'submit' },
+      { key: `↑/↓`, desc: 'scroll' },
+    ]
     if (this.pagination) keyMap.push({ key: `←/→`, desc: 'turn pages' })
-    if (this.opt.sourcePrompts) keyMap.push({ key: `/`, desc: '/' })
+    if (this.opt.tree) keyMap.push({ key: `/`, desc: '/' })
     if (this.opt.tab) keyMap.push({ key: `tab`, desc: 'switch tabs' })
     return generateHelpText(keyMap, isToggledHelp)
   }

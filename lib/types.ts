@@ -1,5 +1,6 @@
 import type inquirer = require('inquirer')
 import type { Key } from 'readline'
+import { TreeNode } from './filter'
 
 export interface Row {
   name?: string
@@ -19,9 +20,7 @@ export interface TableSelectConfig<T extends Row = Row> {
   default?: T['value']
 
   source?: (answers: inquirer.Answers, config: RequestConfig) => Promise<SourceType<T>> | SourceType<T>
-  sourcePrompts?: Array<
-    inquirer.DistinctQuestion & { choices: inquirer.ExpandChoiceMap[keyof inquirer.ExpandChoiceMap][] }
-  >
+  tree?: TreeNode[]
   tab?: string
 
   loadingText?: string
