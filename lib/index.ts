@@ -2,14 +2,10 @@
 // const runAsync = require('run-async')
 import { arc as dots } from 'cli-spinners'
 import Debug from 'debug'
-import Table from 'easy-table'
-import figures from 'figures'
-import isPlainObject from 'lodash.isplainobject'
 import memoizeOne from 'memoize-one'
 import type { Interface as ReadLineInterface } from 'readline'
 import type { Observable, Subscription } from 'rxjs'
 import { filter, takeWhile } from 'rxjs/operators'
-import terminalSize from 'term-size'
 import type { TreeNode } from './filter'
 import { FilterPage } from './filter'
 import type { KeypressEvent, PropsState, Row, TableSelectConfig, TableSelectContext } from './types'
@@ -17,6 +13,10 @@ import { Router, Status } from './types'
 import { generateHelpText, SEPERATOR_CHAR, Shortcut } from './utils/common'
 import { observeObject } from './utils/observe'
 import { Paginator } from './utils/paginator'
+import Table = require('easy-table')
+import figures = require('figures')
+import isPlainObject = require('lodash.isplainobject')
+import terminalSize = require('term-size')
 import pc = require('picocolors')
 import Base = require('inquirer/lib/prompts/base')
 import observe = require('inquirer/lib/utils/events')
@@ -356,7 +356,7 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
       if (typeof currentPage === 'number' && typeof totalPages === 'number')
         left += SEPERATOR_CHAR + `Page ${this.context.pagination.currentPage}/${this.context.pagination.totalPages}`
 
-      const rightChunk = []
+      const rightChunk: string[] = []
       hasPreviousPage && rightChunk.push(`← prev`)
       hasNextPage && rightChunk.push(`next →`)
 

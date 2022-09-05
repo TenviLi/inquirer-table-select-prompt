@@ -1,12 +1,12 @@
-import figures from 'figures'
-import cloneDeep from 'lodash.clonedeep'
-import merge from 'lodash.merge'
+import figures = require('figures')
+import cloneDeep = require('lodash.clonedeep')
+import merge = require('lodash.merge')
 import type { Interface as ReadLineInterface } from 'readline'
 import type { Subscription } from 'rxjs'
-import terminalSize from 'term-size'
 import type { KeypressEvent } from './types'
 import { generateHelpText, Shortcut } from './utils/common'
 import Paginator from './utils/paginator'
+import terminalSize = require('term-size')
 import pc = require('picocolors')
 import type ScreenManager = require('inquirer/lib/utils/screen-manager')
 import assert = require('assert')

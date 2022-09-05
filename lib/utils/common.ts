@@ -1,4 +1,4 @@
-import pc from 'picocolors'
+import * as pc from 'picocolors'
 
 export const chunk = <T>(arr: T[], chunkSize = 1, cache: Array<T[]> = []) => {
   const tmp = [...arr]
@@ -53,7 +53,7 @@ type HelpTextOptions = {
 export function generateHelpText(options: HelpTextOptions): string {
   const { isToggledHelp = false, keyMap = [], hideKeyMap = [], width = Infinity } = options
 
-  const finalKeyMap = []
+  const finalKeyMap: Shortcut[] = []
   if (hideKeyMap.length)
     finalKeyMap.push(
       !isToggledHelp ? { key: '?', desc: 'toggle help' } : { key: pc.cyan('?'), desc: pc.cyan('toggle help') }
