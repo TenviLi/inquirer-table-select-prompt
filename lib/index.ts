@@ -26,6 +26,7 @@ import assert = require('assert')
 import cliCursor = require('cli-cursor')
 import merge = require('lodash.merge')
 const debug = Debug('inquirer-table-select:index')
+export * from './types'
 
 // TODO: 性能优化
 // TODO: inquirer 的各种方法 支持 async，支持各种字段比如 filter transformer 等
