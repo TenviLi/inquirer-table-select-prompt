@@ -7,5 +7,7 @@ tsconfig.json
 *.tsbuildinfo
 lib/**/*.js.map
 lib/**/*.ts
+!lib/**/*.d.ts
 test/**/*.js.map
 test/**/*.ts
+!lib/**/*.d.ts
