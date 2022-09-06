@@ -1,6 +1,7 @@
 examples/
 .gitignore
 tsconfig.json
+.pnpm-debug.log
 
 # Typescript
 *.tsbuildinfo
