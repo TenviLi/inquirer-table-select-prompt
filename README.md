@@ -1,6 +1,6 @@
 # inquirer-table-select-prompt
 
-[![npm](https://badgen.net/npm/v/inquirer-table-select-prompt)](https://www.npmjs.com/package/inquirer-table-select-prompt) [![npm downloads](https://badgen.net/npm/dt/inquirer-table-select-prompt)](https://www.npmjs.com/package/inquirer-table-select-prompt)
+[![npm](https://badgen.net/npm/v/inquirer-table-select-prompt)](https://www.npmjs.com/package/inquirer-table-select-prompt) [![npm downloads](https://badgen.net/npm/dt/inquirer-table-select-prompt)](https://www.npmjs.com/package/inquirer-table-select-prompt) [![github stars](https://badgen.net/github/stars/gylidian/inquirer-table-select-prompt)](https://github.com/gylidian/inquirer-table-select-prompt)
 
 > Table row selection prompt for [Inquirer.js](https://github.com/SBoudrias/Inquirer.js)
 
