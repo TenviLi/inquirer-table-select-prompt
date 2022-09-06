@@ -16,7 +16,7 @@ inquirer
       data: [
         {
           // 必填，提交该行将会展示为 name 字段
-          name: '我是美丽的🍎',
+          name: '库克的🍎',
           // 必填，把每一行数据放在 row 字段下
           row: {
             图标: '🍎',
@@ -28,7 +28,7 @@ inquirer
           value: 'apple',
         },
         {
-          name: '我是美丽的🍌',
+          name: '大剑🍌',
           row: {
             图标: '🍌',
             名称: '香蕉',
