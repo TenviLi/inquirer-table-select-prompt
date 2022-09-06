@@ -5,8 +5,6 @@ tsconfig.json
 # Typescript
 *.tsbuildinfo
 lib/**/*.js.map
-lib/**/*.js
-lib/**/*.d.ts
+lib/**/*.ts
 test/**/*.js.map
-test/**/*.js
-test/**/*.d.ts
+test/**/*.ts
