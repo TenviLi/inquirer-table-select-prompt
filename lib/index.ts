@@ -276,6 +276,10 @@ export class TableSelectPrompt extends Base<TableSelectConfig & inquirer.Questio
     }
   }
   onSubmit(_line?: string) {
+    if (!this.currentRow) {
+      return this.renderNormal('SubmitError: No selected row data')
+    }
+
     this.status = Status.Done
     this.answer = (this.currentRow.short || this.currentRow.name || this.currentRow.value) ?? this.currentRow.row
     this.screen.render(`${this.getQuestion()}${pc.cyan(this.answer)}`, '')
