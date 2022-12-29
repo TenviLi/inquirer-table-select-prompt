@@ -1,6 +1,6 @@
 {
   "name": "inquirer-table-select-prompt",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Another table select prompt plugin of inquirer.js, with powerful table render and filters.",
   "main": "lib/index.js",
   "directories": {
